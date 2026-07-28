@@ -41,11 +41,27 @@ async def xrocket_request(method: str, path: str, payload: dict | None = None, p
         "Accept": "application/json",
         "Content-Type": "application/json",
     }
+    url = f"{xrocket_base()}{path}"
+
     async with aiohttp.ClientSession(headers=headers) as session:
-        async with session.request(method, f"{xrocket_base()}{path}", json=payload, params=params) as response:
-            body = await response.json(content_type=None)
+        async with session.request(method, url, json=payload, params=params, allow_redirects=True) as response:
+            raw_text = await response.text()
+            content_type = response.headers.get("Content-Type", "")
+
+            try:
+                body = json.loads(raw_text) if raw_text.strip() else {}
+            except json.JSONDecodeError:
+                preview = raw_text[:300].replace("\n", " ")
+                raise RuntimeError(
+                    f"xRocket вернул не JSON. HTTP {response.status}, "
+                    f"Content-Type={content_type!r}, URL={url}, ответ={preview!r}"
+                )
+
             if response.status >= 400:
-                raise RuntimeError(f"xRocket HTTP {response.status}: {body}")
+                raise RuntimeError(
+                    f"xRocket HTTP {response.status}, URL={url}: {body}"
+                )
+
             return body
 
 
@@ -58,12 +74,20 @@ def pick(data: dict, *keys, default=None):
 
 async def validate_payment_connections() -> None:
     if settings.crypto_pay_enabled:
-        await crypto_call("getMe")
-        logging.info("Crypto Pay подключён")
+        try:
+            await crypto_call("getMe")
+            logging.info("Crypto Pay подключён")
+        except Exception:
+            logging.exception("Crypto Pay не прошёл проверку при запуске")
+
     if settings.xrocket_enabled:
-        # Проверка выполняется безопасным запросом списка счетов.
-        await xrocket_request("GET", "/api/v1/invoices")
-        logging.info("xRocket подключён")
+        try:
+            await xrocket_request("GET", "/api/v1/app-info")
+            logging.info("xRocket подключён")
+        except Exception:
+            # Платёжный сервис не должен останавливать Telegram-бот и веб-панель.
+            # Подробная причина останется в Railway Deploy Logs.
+            logging.exception("xRocket не прошёл проверку при запуске")
 
 
 async def create_crypto_invoice(user_id: int):
