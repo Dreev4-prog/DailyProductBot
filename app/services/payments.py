@@ -82,7 +82,7 @@ async def validate_payment_connections() -> None:
 
     if settings.xrocket_enabled:
         try:
-            await xrocket_request("GET", "/api/v1/app-info")
+            await xrocket_request("GET", "/api/v1/balances")
             logging.info("xRocket подключён")
         except Exception:
             # Платёжный сервис не должен останавливать Telegram-бот и веб-панель.
