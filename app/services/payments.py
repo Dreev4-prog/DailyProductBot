@@ -18,10 +18,13 @@ def crypto_base() -> str:
 
 
 def xrocket_base() -> str:
+    # Актуальный production URL официального xRocket Pay SDK.
+    # Для mainnet используется https://pay.xrocket.tg
+    # Testnet оставлен отдельным адресом, но рабочая конфигурация пользователя — mainnet.
     return (
-        "https://pay.api.testnet.xrocket.exchange"
+        "https://pay.testnet.xrocket.tg"
         if settings.xrocket_network == "testnet"
-        else "https://pay.api.xrocket.exchange"
+        else "https://pay.xrocket.tg"
     )
 
 
@@ -35,27 +38,39 @@ async def crypto_call(method: str, data: dict[str, Any] | None = None):
             return payload["result"]
 
 
-async def xrocket_request(method: str, path: str, payload: dict | None = None, params: dict | None = None):
+async def xrocket_request(
+    method: str,
+    path: str,
+    payload: dict | None = None,
+    params: dict | None = None,
+):
     headers = {
-        "Authorization": f"Bearer {settings.xrocket_token}",
+        "Rocket-Pay-Key": settings.xrocket_token,
         "Accept": "application/json",
         "Content-Type": "application/json",
     }
-    url = f"{xrocket_base()}{path}"
+    url = f"{xrocket_base().rstrip('/')}/{path.lstrip('/')}"
 
-    async with aiohttp.ClientSession(headers=headers) as session:
-        async with session.request(method, url, json=payload, params=params, allow_redirects=True) as response:
+    timeout = aiohttp.ClientTimeout(total=30)
+    async with aiohttp.ClientSession(headers=headers, timeout=timeout) as session:
+        async with session.request(
+            method,
+            url,
+            json=payload,
+            params=params,
+            allow_redirects=True,
+        ) as response:
             raw_text = await response.text()
             content_type = response.headers.get("Content-Type", "")
 
             try:
                 body = json.loads(raw_text) if raw_text.strip() else {}
-            except json.JSONDecodeError:
-                preview = raw_text[:300].replace("\n", " ")
+            except json.JSONDecodeError as exc:
+                preview = raw_text[:400].replace("\n", " ")
                 raise RuntimeError(
                     f"xRocket вернул не JSON. HTTP {response.status}, "
                     f"Content-Type={content_type!r}, URL={url}, ответ={preview!r}"
-                )
+                ) from exc
 
             if response.status >= 400:
                 raise RuntimeError(
@@ -67,7 +82,7 @@ async def xrocket_request(method: str, path: str, payload: dict | None = None, p
 
 def pick(data: dict, *keys, default=None):
     for key in keys:
-        if key in data and data[key] is not None:
+        if isinstance(data, dict) and key in data and data[key] is not None:
             return data[key]
     return default
 
@@ -82,11 +97,12 @@ async def validate_payment_connections() -> None:
 
     if settings.xrocket_enabled:
         try:
-            await xrocket_request("GET", "/api/v1/balances")
-            logging.info("xRocket подключён")
+            result = await xrocket_request("GET", "/app/info")
+            app_data = result.get("data", result) if isinstance(result, dict) else result
+            app_name = pick(app_data, "name", "appName", default="xRocket app")
+            logging.info("xRocket подключён: %s", app_name)
         except Exception:
-            # Платёжный сервис не должен останавливать Telegram-бот и веб-панель.
-            # Подробная причина останется в Railway Deploy Logs.
+            # Ошибка xRocket не должна останавливать Telegram-бот.
             logging.exception("xRocket не прошёл проверку при запуске")
 
 
@@ -101,32 +117,51 @@ async def create_crypto_invoice(user_id: int):
         "allow_anonymous": "false",
     })
     invoice_id = str(result["invoice_id"])
-    pay_url = result.get("bot_invoice_url") or result.get("mini_app_invoice_url") or result.get("pay_url")
-    await store_invoice("crypto", invoice_id, user_id, None, "active", pay_url, result)
+    pay_url = (
+        result.get("bot_invoice_url")
+        or result.get("mini_app_invoice_url")
+        or result.get("pay_url")
+    )
+    await store_invoice(
+        "crypto", invoice_id, user_id, None, "active", pay_url, result
+    )
     return invoice_id, pay_url
 
 
 async def create_xrocket_invoice(user_id: int):
     client_id = f"dtv2-{user_id}-{uuid.uuid4().hex[:12]}"
-    # Поля соответствуют общей модели xRocket Pay API. В случае изменения API
-    # ответ и ошибка сохраняются в Railway logs.
+
     payload = {
         "amount": float(settings.price_usdt),
-        "currency": settings.xrocket_asset,
-        "asset": settings.xrocket_asset,
-        "description": f"DT Team — {settings.access_days} days",
-        "clientInvoiceId": client_id,
-        "customData": str(user_id),
+        "currency": settings.xrocket_asset.upper(),
+        "description": f"DT Team — доступ на {settings.access_days} дней",
+        "numPayments": 1,
+        "expiredIn": 3600,
     }
-    result = await xrocket_request("POST", "/api/v1/invoices", payload)
+
+    result = await xrocket_request("POST", "/tg-invoices", payload=payload)
     data = result.get("data", result)
-    invoice_id = str(pick(data, "invoiceId", "id"))
-    pay_url = pick(data, "link", "payUrl", "url", "botLink")
-    if not invoice_id or not pay_url:
-        raise RuntimeError(f"xRocket: неизвестный формат ответа {result}")
+
+    invoice_id = pick(data, "id", "invoiceId", "_id")
+    pay_url = pick(data, "link", "url", "payUrl", "botLink")
+
+    if invoice_id is None or not pay_url:
+        raise RuntimeError(
+            f"xRocket создал счёт, но вернул неизвестный формат: {result}"
+        )
+
     status = str(pick(data, "status", default="active")).lower()
-    await store_invoice("xrocket", invoice_id, user_id, client_id, status, pay_url, result)
-    return invoice_id, pay_url
+
+    await store_invoice(
+        "xrocket",
+        str(invoice_id),
+        user_id,
+        client_id,
+        status,
+        pay_url,
+        result,
+    )
+    return str(invoice_id), pay_url
 
 
 async def store_invoice(provider, invoice_id, user_id, client_id, status, pay_url, raw):
@@ -196,11 +231,42 @@ async def check_crypto_invoices() -> None:
 
 async def check_xrocket_invoices() -> None:
     for row in await pending_invoices("xrocket"):
-        params = {"invoiceId": row["invoice_id"]}
-        result = await xrocket_request("GET", "/api/v1/invoice", params=params)
+        result = await xrocket_request(
+            "GET",
+            f"/tg-invoices/{row['invoice_id']}",
+        )
         data = result.get("data", result)
-        status = str(pick(data, "status", "invoiceStatus", default="")).lower()
-        if status in {"paid", "completed", "success", "successful"}:
+
+        status = str(
+            pick(data, "status", "invoiceStatus", default="")
+        ).lower()
+
+        paid_payments = pick(
+            data,
+            "paidPayments",
+            "paymentsCount",
+            "paidCount",
+            default=0,
+        )
+        required_payments = pick(
+            data,
+            "numPayments",
+            "paymentsNumber",
+            default=1,
+        )
+
+        try:
+            is_paid_by_count = int(paid_payments) >= int(required_payments)
+        except (TypeError, ValueError):
+            is_paid_by_count = False
+
+        if status in {
+            "paid",
+            "completed",
+            "success",
+            "successful",
+            "finished",
+        } or is_paid_by_count:
             await activate_paid(row)
 
 
