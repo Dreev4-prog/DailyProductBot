@@ -5,7 +5,7 @@ from typing import Any
 
 import aiohttp
 
-from app.bot import bot
+from app.core import bot
 from app.config import settings
 from app.database import connect, now_ts
 from app.services.access import activate_access

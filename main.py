@@ -3,7 +3,8 @@ import logging
 
 import uvicorn
 
-from app.bot import bot, dp, scheduler
+from app.bot import bot, dp
+from app.core import scheduler
 from app.config import settings
 from app.database import init_db
 from app.services.payments import validate_payment_connections

@@ -1,4 +1,4 @@
-from app.bot import scheduler
+from app.core import scheduler
 from app.config import settings
 from app.services.payments import check_all_invoices
 from app.services.products import daily_distribution

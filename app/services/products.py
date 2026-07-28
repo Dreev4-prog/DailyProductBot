@@ -2,7 +2,7 @@ import asyncio
 import random
 from datetime import datetime
 
-from app.bot import bot
+from app.core import bot
 from app.config import settings
 from app.database import connect, now_ts
 from app.keyboards import product_actions
