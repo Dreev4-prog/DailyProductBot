@@ -113,6 +113,11 @@ async def init_db() -> None:
             PRIMARY KEY(code, user_id)
         );
         """)
+
+        columns = await (await db.execute("PRAGMA table_info(products)")).fetchall()
+        column_names = {row["name"] for row in columns}
+        if "deleted_at" not in column_names:
+            await db.execute("ALTER TABLE products ADD COLUMN deleted_at INTEGER")
         await db.commit()
     finally:
         await db.close()

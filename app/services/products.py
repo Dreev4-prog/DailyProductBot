@@ -52,7 +52,7 @@ async def select_products(user_id: int, amount: int):
     categories, budget_min, budget_max = await preferences(user_id)
     query = """
         SELECT p.* FROM products p
-        WHERE p.active=1
+        WHERE p.active=1 AND p.deleted_at IS NULL
           AND NOT EXISTS (
             SELECT 1 FROM assignments a WHERE a.user_id=? AND a.product_id=p.id
           )
@@ -74,7 +74,7 @@ async def select_products(user_id: int, amount: int):
         if len(rows) < amount:
             rows = await (await db.execute("""
                 SELECT p.* FROM products p
-                WHERE p.active=1
+                WHERE p.active=1 AND p.deleted_at IS NULL
                   AND NOT EXISTS (
                     SELECT 1 FROM assignments a WHERE a.user_id=? AND a.product_id=p.id
                   )

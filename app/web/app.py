@@ -37,7 +37,7 @@ async def dashboard(request: Request, _: str = Depends(auth)):
             "SELECT COUNT(*) c FROM users WHERE access_until>?", (now_ts(),)
         )).fetchone())["c"]
         rows = await (await db.execute(
-            "SELECT * FROM products ORDER BY id DESC LIMIT 50"
+            "SELECT * FROM products WHERE deleted_at IS NULL ORDER BY id DESC LIMIT 50"
         )).fetchall()
     finally:
         await db.close()
@@ -83,11 +83,71 @@ async def add_product(
 async def toggle_product(product_id: int, _: str = Depends(auth)):
     db = await connect()
     try:
-        await db.execute("UPDATE products SET active=1-active WHERE id=?", (product_id,))
+        await db.execute("""
+            UPDATE products SET active=1-active
+            WHERE id=? AND deleted_at IS NULL
+        """, (product_id,))
         await db.commit()
     finally:
         await db.close()
     return RedirectResponse("/", status_code=303)
+
+
+@web_app.post("/products/{product_id}/delete")
+async def delete_product(product_id: int, _: str = Depends(auth)):
+    db = await connect()
+    try:
+        await db.execute(
+            "UPDATE products SET deleted_at=?, active=0 WHERE id=?",
+            (now_ts(), product_id),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+    return RedirectResponse("/", status_code=303)
+
+
+@web_app.get("/trash", response_class=HTMLResponse)
+async def trash(request: Request, _: str = Depends(auth)):
+    db = await connect()
+    try:
+        rows = await (await db.execute(
+            "SELECT * FROM products WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC"
+        )).fetchall()
+    finally:
+        await db.close()
+    return templates.TemplateResponse("trash.html", {
+        "request": request,
+        "rows": rows,
+    })
+
+
+@web_app.post("/products/{product_id}/restore")
+async def restore_product(product_id: int, _: str = Depends(auth)):
+    db = await connect()
+    try:
+        await db.execute(
+            "UPDATE products SET deleted_at=NULL, active=1 WHERE id=?",
+            (product_id,),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+    return RedirectResponse("/trash", status_code=303)
+
+
+@web_app.post("/products/{product_id}/hard-delete")
+async def hard_delete_product(product_id: int, _: str = Depends(auth)):
+    db = await connect()
+    try:
+        await db.execute(
+            "DELETE FROM products WHERE id=? AND deleted_at IS NOT NULL",
+            (product_id,),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+    return RedirectResponse("/trash", status_code=303)
 
 
 @web_app.get("/health")

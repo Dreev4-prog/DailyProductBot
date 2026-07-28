@@ -34,13 +34,21 @@ table{width:100%;border-collapse:collapse}td,th{padding:10px;border-bottom:1px s
 <button>Добавить товар</button>
 </form>
 </div>
+<p><a href="/trash" style="color:#f2c94c">🗑 Открыть корзину</a></p>
 <h2>Последние товары</h2>
 <div class="card"><table>
 <tr><th>ID</th><th>Категория</th><th>Название</th><th>Цена</th><th>Статус</th><th></th></tr>
 {% for p in rows %}
 <tr><td>{{p.id}}</td><td>{{p.category}}</td><td>{{p.title}}</td><td>{{p.price_text}}</td>
 <td>{{"Активен" if p.active else "Скрыт"}}</td>
-<td><form method="post" action="/products/{{p.id}}/toggle"><button>{{"Скрыть" if p.active else "Включить"}}</button></form></td></tr>
+<td>
+<form method="post" action="/products/{{p.id}}/toggle" style="display:inline">
+<button>{{"Скрыть" if p.active else "Включить"}}</button>
+</form>
+<form method="post" action="/products/{{p.id}}/delete" style="display:inline" onsubmit="return confirm('Переместить товар в корзину?')">
+<button>В корзину</button>
+</form>
+</td></tr>
 {% endfor %}
 </table></div>
 </div></body></html>

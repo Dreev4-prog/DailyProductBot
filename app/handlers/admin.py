@@ -2,7 +2,7 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, Message, InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.config import settings
 from app.database import connect, now_ts
@@ -28,6 +28,74 @@ class Broadcast(StatesGroup):
 
 def admin_only(user_id: int) -> bool:
     return user_id in settings.admin_ids
+
+
+def products_list_keyboard(rows, page: int, trash: bool = False) -> InlineKeyboardMarkup:
+    buttons = []
+    prefix = "trashprod" if trash else "product"
+    for row in rows:
+        status_icon = "🟢" if row["active"] else "⚫️"
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"{status_icon} #{row['id']} {row['title'][:32]}",
+                callback_data=f"admin:{prefix}:{row['id']}"
+            )
+        ])
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="⬅️", callback_data=f"admin:{'trash' if trash else 'products'}:{page-1}"))
+    nav.append(InlineKeyboardButton(text=f"Стр. {page+1}", callback_data="admin:noop"))
+    if len(rows) == 10:
+        nav.append(InlineKeyboardButton(text="➡️", callback_data=f"admin:{'trash' if trash else 'products'}:{page+1}"))
+    buttons.append(nav)
+    if trash:
+        buttons.append([InlineKeyboardButton(text="↩️ К товарам", callback_data="admin:products:0")])
+    else:
+        buttons.append([InlineKeyboardButton(text="🗑 Корзина", callback_data="admin:trash:0")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def product_manage_keyboard(product_id: int, active: int, deleted: bool = False) -> InlineKeyboardMarkup:
+    if deleted:
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="♻️ Восстановить", callback_data=f"admin:restore:{product_id}")],
+            [InlineKeyboardButton(text="❌ Удалить навсегда", callback_data=f"admin:harddelete_confirm:{product_id}")],
+            [InlineKeyboardButton(text="⬅️ Корзина", callback_data="admin:trash:0")],
+        ])
+    toggle_text = "🚫 Скрыть" if active else "✅ Включить"
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=toggle_text, callback_data=f"admin:toggle:{product_id}")],
+        [InlineKeyboardButton(text="🗑 В корзину", callback_data=f"admin:delete_confirm:{product_id}")],
+        [InlineKeyboardButton(text="⬅️ К товарам", callback_data="admin:products:0")],
+    ])
+
+
+async def fetch_product(product_id: int):
+    db = await connect()
+    try:
+        return await (await db.execute("SELECT * FROM products WHERE id=?", (product_id,))).fetchone()
+    finally:
+        await db.close()
+
+
+async def show_product_card(callback: CallbackQuery, product_id: int) -> None:
+    product = await fetch_product(product_id)
+    if not product:
+        await callback.answer("Товар не найден.", show_alert=True)
+        return
+    deleted = product["deleted_at"] is not None
+    text = (
+        f"📦 <b>Товар #{product['id']}</b>\n\n"
+        f"Категория: <b>{product['category']}</b>\n"
+        f"Название: <b>{product['title']}</b>\n"
+        f"Цена: <b>{product['price_text']}</b>\n"
+        f"Статус: <b>{'В корзине' if deleted else ('Активен' if product['active'] else 'Скрыт')}</b>"
+    )
+    await callback.message.edit_text(
+        text,
+        parse_mode="HTML",
+        reply_markup=product_manage_keyboard(product["id"], product["active"], deleted),
+    )
 
 
 @router.message(Command("admin"))
@@ -111,17 +179,181 @@ async def add_price(message: Message, state: FSMContext) -> None:
     await message.answer("✅ Товар добавлен.", reply_markup=admin_menu())
 
 
-@router.callback_query(F.data == "admin:products")
+@router.callback_query(F.data.startswith("admin:products"))
 async def product_stats(callback: CallbackQuery) -> None:
     if not admin_only(callback.from_user.id):
         return
+    parts = callback.data.split(":")
+    page = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
     db = await connect()
     try:
-        total = await (await db.execute("SELECT COUNT(*) c FROM products WHERE active=1")).fetchone()
+        rows = await (await db.execute("""
+            SELECT * FROM products
+            WHERE deleted_at IS NULL
+            ORDER BY id DESC
+            LIMIT 10 OFFSET ?
+        """, (page * 10,))).fetchall()
     finally:
         await db.close()
     await callback.answer()
-    await callback.message.answer(f"Активных товаров: {total['c']}")
+    await callback.message.edit_text(
+        "📦 <b>База товаров</b>\n\nВыберите товар:",
+        parse_mode="HTML",
+        reply_markup=products_list_keyboard(rows, page),
+    )
+
+
+@router.callback_query(F.data.startswith("admin:trash"))
+async def trash_list(callback: CallbackQuery) -> None:
+    if not admin_only(callback.from_user.id):
+        return
+    parts = callback.data.split(":")
+    page = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+    db = await connect()
+    try:
+        rows = await (await db.execute("""
+            SELECT * FROM products
+            WHERE deleted_at IS NOT NULL
+            ORDER BY deleted_at DESC
+            LIMIT 10 OFFSET ?
+        """, (page * 10,))).fetchall()
+    finally:
+        await db.close()
+    await callback.answer()
+    await callback.message.edit_text(
+        "🗑 <b>Корзина товаров</b>\n\nВыберите товар:",
+        parse_mode="HTML",
+        reply_markup=products_list_keyboard(rows, page, trash=True),
+    )
+
+
+@router.callback_query(F.data.startswith("admin:product:"))
+async def product_card(callback: CallbackQuery) -> None:
+    if admin_only(callback.from_user.id):
+        await callback.answer()
+        await show_product_card(callback, int(callback.data.split(":")[2]))
+
+
+@router.callback_query(F.data.startswith("admin:trashprod:"))
+async def trash_product_card(callback: CallbackQuery) -> None:
+    if admin_only(callback.from_user.id):
+        await callback.answer()
+        await show_product_card(callback, int(callback.data.split(":")[2]))
+
+
+@router.callback_query(F.data.startswith("admin:toggle:"))
+async def toggle_product(callback: CallbackQuery) -> None:
+    if not admin_only(callback.from_user.id):
+        return
+    product_id = int(callback.data.split(":")[2])
+    db = await connect()
+    try:
+        await db.execute("""
+            UPDATE products SET active=CASE WHEN active=1 THEN 0 ELSE 1 END
+            WHERE id=? AND deleted_at IS NULL
+        """, (product_id,))
+        await db.commit()
+    finally:
+        await db.close()
+    await callback.answer("Статус изменён.")
+    await show_product_card(callback, product_id)
+
+
+@router.callback_query(F.data.startswith("admin:delete_confirm:"))
+async def delete_confirm(callback: CallbackQuery) -> None:
+    if not admin_only(callback.from_user.id):
+        return
+    product_id = int(callback.data.split(":")[2])
+    await callback.answer()
+    await callback.message.edit_text(
+        "Переместить товар в корзину?",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Да", callback_data=f"admin:delete:{product_id}")],
+            [InlineKeyboardButton(text="❌ Нет", callback_data=f"admin:product:{product_id}")],
+        ]),
+    )
+
+
+@router.callback_query(F.data.startswith("admin:delete:"))
+async def soft_delete(callback: CallbackQuery) -> None:
+    if not admin_only(callback.from_user.id):
+        return
+    product_id = int(callback.data.split(":")[2])
+    db = await connect()
+    try:
+        await db.execute(
+            "UPDATE products SET deleted_at=?, active=0 WHERE id=?",
+            (now_ts(), product_id),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+    await callback.answer("Товар перемещён в корзину.", show_alert=True)
+    await callback.message.edit_text(
+        "✅ Товар перемещён в корзину.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📦 К товарам", callback_data="admin:products:0")],
+            [InlineKeyboardButton(text="🗑 Открыть корзину", callback_data="admin:trash:0")],
+        ]),
+    )
+
+
+@router.callback_query(F.data.startswith("admin:restore:"))
+async def restore_product(callback: CallbackQuery) -> None:
+    if not admin_only(callback.from_user.id):
+        return
+    product_id = int(callback.data.split(":")[2])
+    db = await connect()
+    try:
+        await db.execute(
+            "UPDATE products SET deleted_at=NULL, active=1 WHERE id=?",
+            (product_id,),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+    await callback.answer("Товар восстановлен.", show_alert=True)
+    await show_product_card(callback, product_id)
+
+
+@router.callback_query(F.data.startswith("admin:harddelete_confirm:"))
+async def hard_delete_confirm(callback: CallbackQuery) -> None:
+    if not admin_only(callback.from_user.id):
+        return
+    product_id = int(callback.data.split(":")[2])
+    await callback.answer()
+    await callback.message.edit_text(
+        "⚠️ Удалить товар навсегда?\n\nБудут удалены также связанные выдачи, избранное и отзывы.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Удалить навсегда", callback_data=f"admin:harddelete:{product_id}")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"admin:trashprod:{product_id}")],
+        ]),
+    )
+
+
+@router.callback_query(F.data.startswith("admin:harddelete:"))
+async def hard_delete(callback: CallbackQuery) -> None:
+    if not admin_only(callback.from_user.id):
+        return
+    product_id = int(callback.data.split(":")[2])
+    db = await connect()
+    try:
+        await db.execute("DELETE FROM products WHERE id=? AND deleted_at IS NOT NULL", (product_id,))
+        await db.commit()
+    finally:
+        await db.close()
+    await callback.answer("Товар удалён навсегда.", show_alert=True)
+    await callback.message.edit_text(
+        "❌ Товар удалён навсегда.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🗑 Вернуться в корзину", callback_data="admin:trash:0")]
+        ]),
+    )
+
+
+@router.callback_query(F.data == "admin:noop")
+async def noop(callback: CallbackQuery) -> None:
+    await callback.answer()
 
 
 @router.callback_query(F.data == "admin:users")
@@ -247,3 +479,21 @@ async def promo(message: Message) -> None:
 async def cancel(message: Message, state: FSMContext) -> None:
     await state.clear()
     await message.answer("Операция отменена.")
+
+
+@router.message(Command("paymentstatus"))
+async def payment_status(message: Message) -> None:
+    if not admin_only(message.from_user.id):
+        return
+    crypto = "✅ включён" if settings.crypto_pay_enabled else "❌ выключен"
+    xrocket = "✅ включён" if settings.xrocket_enabled else "❌ выключен"
+    token = "✅ задан" if settings.xrocket_token else "❌ не задан"
+    network = settings.xrocket_network
+    await message.answer(
+        "💳 <b>Статус платежей</b>\n\n"
+        f"Crypto Bot: <b>{crypto}</b>\n"
+        f"xRocket: <b>{xrocket}</b>\n"
+        f"xRocket token: <b>{token}</b>\n"
+        f"xRocket network: <b>{network}</b>",
+        parse_mode="HTML",
+    )

@@ -9,7 +9,7 @@ from aiogram.types import CallbackQuery, Message
 
 from app.config import settings
 from app.database import connect, now_ts
-from app.keyboards import payment_methods, user_menu
+from app.keyboards import payment_methods, main_menu
 from app.services.products import already_today, has_access, issue_products
 from app.utils import brand_header, product_caption
 
@@ -53,13 +53,103 @@ async def start(message: Message) -> None:
     if len(parts) == 2 and parts[1].startswith("ref_") and parts[1][4:].isdigit():
         referrer = int(parts[1][4:])
     await register(message, referrer)
-    await message.answer(
-        brand_header("ПЕРСОНАЛЬНЫЕ ТОВАРЫ ДЛЯ ПЕРЕПРОДАЖИ") +
-        f"\nЕжедневно: <b>{settings.products_per_day} уникальных товара</b>\n"
-        f"Доступ: <b>{settings.access_days} дней</b>\n"
-        f"Цена: <b>{settings.price_usdt} USDT</b>",
+    await send_home(message)
+
+
+@router.callback_query(F.data == "menu:home")
+async def menu_home(callback: CallbackQuery) -> None:
+    await callback.answer()
+    await send_home(callback)
+
+
+@router.callback_query(F.data == "menu:buy")
+async def menu_buy(callback: CallbackQuery) -> None:
+    await callback.answer()
+    if not settings.crypto_pay_enabled and not settings.xrocket_enabled:
+        await callback.message.answer("Оплата временно недоступна.")
+        return
+    await callback.message.answer(
+        "⚡️ <b>DT TEAM — ОПЛАТА</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"Сумма: <b>{settings.price_usdt} USDT</b>\n\n"
+        "Выберите удобный способ оплаты:",
         parse_mode="HTML",
-        reply_markup=user_menu(),
+        reply_markup=payment_methods(),
+    )
+
+
+@router.callback_query(F.data == "menu:products")
+async def menu_products(callback: CallbackQuery) -> None:
+    await callback.answer()
+    if not await has_access(callback.from_user.id):
+        await callback.message.answer(
+            "🔒 <b>Активного доступа нет</b>\n\n"
+            "Оформите доступ, чтобы получать персональные товары.",
+            parse_mode="HTML",
+            reply_markup=payment_methods(),
+        )
+        return
+    sent = await issue_products(callback.from_user.id)
+    if not sent:
+        if await already_today(callback.from_user.id) >= settings.products_per_day:
+            await callback.message.answer("✅ Сегодняшние товары уже получены.", reply_markup=main_menu())
+        else:
+            await callback.message.answer("В базе пока недостаточно новых товаров.", reply_markup=main_menu())
+
+
+@router.callback_query(F.data == "menu:profile")
+async def menu_profile(callback: CallbackQuery) -> None:
+    await callback.answer()
+    db = await connect()
+    try:
+        user = await (await db.execute("SELECT * FROM users WHERE user_id=?", (callback.from_user.id,))).fetchone()
+        count = await (await db.execute(
+            "SELECT COUNT(*) c FROM assignments WHERE user_id=?", (callback.from_user.id,)
+        )).fetchone()
+        sold = await (await db.execute(
+            "SELECT COUNT(*) c FROM feedback WHERE user_id=? AND status='sold'", (callback.from_user.id,)
+        )).fetchone()
+    finally:
+        await db.close()
+
+    active = bool(user and user["access_until"] > now_ts())
+    until = datetime.fromtimestamp(user["access_until"], settings.timezone).strftime("%d.%m.%Y %H:%M") if active else "—"
+    await callback.message.answer(
+        "⚡️ <b>DT TEAM — ПРОФИЛЬ</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"Статус: <b>{'активен' if active else 'нет доступа'}</b>\n"
+        f"Доступ до: <b>{until}</b>\n"
+        f"Получено товаров: <b>{count['c']}</b>\n"
+        f"Продано: <b>{sold['c']}</b>",
+        parse_mode="HTML",
+        reply_markup=main_menu(),
+    )
+
+
+@router.callback_query(F.data == "menu:archive")
+async def menu_archive(callback: CallbackQuery) -> None:
+    await callback.answer()
+    await show_collection(callback.message, """
+        SELECT p.* FROM assignments a JOIN products p ON p.id=a.product_id
+        WHERE a.user_id=? ORDER BY a.delivered_at DESC
+    """, (callback.from_user.id,))
+
+
+@router.callback_query(F.data == "menu:favorites")
+async def menu_favorites(callback: CallbackQuery) -> None:
+    await callback.answer()
+    await show_collection(callback.message, """
+        SELECT p.* FROM favorites f JOIN products p ON p.id=f.product_id
+        WHERE f.user_id=? ORDER BY f.created_at DESC
+    """, (callback.from_user.id,))
+
+
+@router.callback_query(F.data == "menu:support")
+async def menu_support(callback: CallbackQuery) -> None:
+    await callback.answer()
+    await callback.message.answer(
+        f"💬 Поддержка: {settings.support_username}",
+        reply_markup=main_menu(),
     )
 
 
@@ -184,7 +274,7 @@ async def feedback(callback: CallbackQuery) -> None:
     await callback.answer("Ответ сохранён.", show_alert=True)
 
 
-@router.message(F.text == "⚙️ Настройки")
+@router.message(F.text == "__disabled_settings__")
 async def preferences_start(message: Message, state: FSMContext) -> None:
     await state.set_state(Preferences.categories)
     await message.answer("Введите категории через запятую или отправьте «Все».")
@@ -229,7 +319,7 @@ async def preferences_budget(message: Message, state: FSMContext) -> None:
     await message.answer("✅ Настройки сохранены.")
 
 
-@router.message(F.text == "🎁 Пригласить друга")
+@router.message(F.text == "__disabled_referral__")
 async def referral(message: Message) -> None:
     me = await message.bot.get_me()
     link = f"https://t.me/{me.username}?start=ref_{message.from_user.id}"
