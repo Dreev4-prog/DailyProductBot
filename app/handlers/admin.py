@@ -22,6 +22,14 @@ class AddProduct(StatesGroup):
     price = State()
 
 
+class EditProduct(StatesGroup):
+    category = State()
+    title = State()
+    description = State()
+    image = State()
+    price = State()
+
+
 class Broadcast(StatesGroup):
     message = State()
 
@@ -64,6 +72,7 @@ def product_manage_keyboard(product_id: int, active: int, deleted: bool = False)
         ])
     toggle_text = "🚫 Скрыть" if active else "✅ Включить"
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✏️ Изменить", callback_data=f"admin:edit:{product_id}")],
         [InlineKeyboardButton(text=toggle_text, callback_data=f"admin:toggle:{product_id}")],
         [InlineKeyboardButton(text="🗑 В корзину", callback_data=f"admin:delete_confirm:{product_id}")],
         [InlineKeyboardButton(text="⬅️ К товарам", callback_data="admin:products:0")],
@@ -83,18 +92,25 @@ async def show_product_card(callback: CallbackQuery, product_id: int) -> None:
     if not product:
         await callback.answer("Товар не найден.", show_alert=True)
         return
+
     deleted = product["deleted_at"] is not None
-    text = (
+    card_text = (
         f"📦 <b>Товар #{product['id']}</b>\n\n"
         f"Категория: <b>{product['category']}</b>\n"
         f"Название: <b>{product['title']}</b>\n"
+        f"Описание: {product['description']}\n"
         f"Цена: <b>{product['price_text']}</b>\n"
         f"Статус: <b>{'В корзине' if deleted else ('Активен' if product['active'] else 'Скрыт')}</b>"
     )
-    await callback.message.edit_text(
-        text,
+
+    await callback.message.answer(
+        card_text,
         parse_mode="HTML",
-        reply_markup=product_manage_keyboard(product["id"], product["active"], deleted),
+        reply_markup=product_manage_keyboard(
+            product["id"],
+            product["active"],
+            deleted,
+        ),
     )
 
 
@@ -179,7 +195,7 @@ async def add_price(message: Message, state: FSMContext) -> None:
     await message.answer("✅ Товар добавлен.", reply_markup=admin_menu())
 
 
-@router.callback_query(F.data.startswith("admin:products"))
+@router.callback_query((F.data == "admin:products") | F.data.startswith("admin:products:"))
 async def product_stats(callback: CallbackQuery) -> None:
     if not admin_only(callback.from_user.id):
         return
@@ -196,14 +212,21 @@ async def product_stats(callback: CallbackQuery) -> None:
     finally:
         await db.close()
     await callback.answer()
-    await callback.message.edit_text(
-        "📦 <b>База товаров</b>\n\nВыберите товар:",
+    if not rows:
+        await callback.message.answer(
+            "📦 <b>База товаров пуста</b>\n\nСначала добавьте товар.",
+            parse_mode="HTML",
+            reply_markup=admin_menu(),
+        )
+        return
+    await callback.message.answer(
+        "📦 <b>База товаров</b>\n\nНажмите на товар для управления:",
         parse_mode="HTML",
         reply_markup=products_list_keyboard(rows, page),
     )
 
 
-@router.callback_query(F.data.startswith("admin:trash"))
+@router.callback_query((F.data == "admin:trash") | F.data.startswith("admin:trash:"))
 async def trash_list(callback: CallbackQuery) -> None:
     if not admin_only(callback.from_user.id):
         return
@@ -220,7 +243,16 @@ async def trash_list(callback: CallbackQuery) -> None:
     finally:
         await db.close()
     await callback.answer()
-    await callback.message.edit_text(
+    if not rows:
+        await callback.message.answer(
+            "🗑 <b>Корзина пуста</b>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ К товарам", callback_data="admin:products:0")]
+            ]),
+        )
+        return
+    await callback.message.answer(
         "🗑 <b>Корзина товаров</b>\n\nВыберите товар:",
         parse_mode="HTML",
         reply_markup=products_list_keyboard(rows, page, trash=True),
@@ -239,6 +271,128 @@ async def trash_product_card(callback: CallbackQuery) -> None:
     if admin_only(callback.from_user.id):
         await callback.answer()
         await show_product_card(callback, int(callback.data.split(":")[2]))
+
+
+
+@router.callback_query(F.data.startswith("admin:edit:"))
+async def edit_product_start(callback: CallbackQuery, state: FSMContext) -> None:
+    if not admin_only(callback.from_user.id):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    product_id = int(callback.data.split(":")[2])
+    product = await fetch_product(product_id)
+    if not product or product["deleted_at"] is not None:
+        await callback.answer("Товар не найден.", show_alert=True)
+        return
+
+    await state.clear()
+    await state.set_state(EditProduct.category)
+    await state.update_data(
+        product_id=product_id,
+        old_image_file_id=product["image_file_id"],
+        old_image_type=product["image_type"],
+    )
+    await callback.answer()
+    await callback.message.answer(
+        f"✏️ Редактирование товара #{product_id}\n\n"
+        f"Текущая категория: {product['category']}\n\n"
+        "Введите новую категорию или отправьте «-», чтобы оставить прежнюю."
+    )
+
+
+@router.message(EditProduct.category)
+async def edit_category(message: Message, state: FSMContext) -> None:
+    value = (message.text or "").strip()
+    await state.update_data(category=None if value == "-" else value)
+    await state.set_state(EditProduct.title)
+    await message.answer("Введите новое название или «-», чтобы оставить прежнее.")
+
+
+@router.message(EditProduct.title)
+async def edit_title(message: Message, state: FSMContext) -> None:
+    value = (message.text or "").strip()
+    await state.update_data(title=None if value == "-" else value)
+    await state.set_state(EditProduct.description)
+    await message.answer("Введите новое описание или «-», чтобы оставить прежнее.")
+
+
+@router.message(EditProduct.description)
+async def edit_description(message: Message, state: FSMContext) -> None:
+    value = (message.text or "").strip()
+    await state.update_data(description=None if value == "-" else value)
+    await state.set_state(EditProduct.image)
+    await message.answer(
+        "Отправьте новую картинку.\n"
+        "Чтобы оставить старую, отправьте текст «-»."
+    )
+
+
+@router.message(EditProduct.image, F.photo | F.document)
+async def edit_image(message: Message, state: FSMContext) -> None:
+    if message.photo:
+        file_id, image_type = message.photo[-1].file_id, "photo"
+    elif message.document and (message.document.mime_type or "").startswith("image/"):
+        file_id, image_type = message.document.file_id, "document"
+    else:
+        await message.answer("Нужно отправить изображение или «-».")
+        return
+    await state.update_data(image_file_id=file_id, image_type=image_type)
+    await state.set_state(EditProduct.price)
+    await message.answer("Введите новую цену или «-», чтобы оставить прежнюю.")
+
+
+@router.message(EditProduct.image, F.text == "-")
+async def edit_keep_image(message: Message, state: FSMContext) -> None:
+    await state.update_data(image_file_id=None, image_type=None)
+    await state.set_state(EditProduct.price)
+    await message.answer("Введите новую цену или «-», чтобы оставить прежнюю.")
+
+
+@router.message(EditProduct.image)
+async def edit_image_invalid(message: Message) -> None:
+    await message.answer("Отправьте новую картинку или текст «-».")
+
+
+@router.message(EditProduct.price)
+async def edit_price(message: Message, state: FSMContext) -> None:
+    value = (message.text or "").strip()
+    data = await state.get_data()
+    product_id = data["product_id"]
+
+    product = await fetch_product(product_id)
+    if not product:
+        await state.clear()
+        await message.answer("Товар больше не существует.")
+        return
+
+    category = data.get("category") or product["category"]
+    title = data.get("title") or product["title"]
+    description = data.get("description") or product["description"]
+    image_file_id = data.get("image_file_id") or data["old_image_file_id"]
+    image_type = data.get("image_type") or data["old_image_type"]
+    price_text = product["price_text"] if value == "-" else value
+    price_num = product["price_num"] if value == "-" else parse_price(value)
+
+    db = await connect()
+    try:
+        await db.execute("""
+            UPDATE products
+            SET category=?, title=?, description=?, image_file_id=?,
+                image_type=?, price_text=?, price_num=?
+            WHERE id=? AND deleted_at IS NULL
+        """, (
+            category, title, description, image_file_id,
+            image_type, price_text, price_num, product_id,
+        ))
+        await db.commit()
+    finally:
+        await db.close()
+
+    await state.clear()
+    await message.answer(
+        f"✅ Товар #{product_id} изменён.",
+        reply_markup=admin_menu(),
+    )
 
 
 @router.callback_query(F.data.startswith("admin:toggle:"))

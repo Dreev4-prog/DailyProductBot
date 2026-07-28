@@ -5,7 +5,7 @@ from aiogram import F, Router
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, Message, ReplyKeyboardRemove
 
 from app.config import settings
 from app.database import connect, now_ts
@@ -44,6 +44,30 @@ async def register(message: Message, referrer_id: int | None = None) -> None:
         await db.commit()
     finally:
         await db.close()
+
+
+
+async def send_home(message_or_callback) -> None:
+    target = message_or_callback.message if isinstance(message_or_callback, CallbackQuery) else message_or_callback
+
+    # Удаляем старую обычную клавиатуру Telegram.
+    await target.answer(
+        "Обновляем меню…",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+
+    await target.answer(
+        "⚡️ <b>DT TEAM</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "🚀 <b>ТОВАРЫ ДЛЯ ПЕРЕПРОДАЖИ</b>\n\n"
+        f"Каждый день вы получаете <b>{settings.products_per_day} персональных товара</b> "
+        "без повторов.\n\n"
+        f"💎 Доступ: <b>{settings.access_days} дней</b>\n"
+        f"💰 Стоимость: <b>{settings.price_usdt} USDT</b>\n\n"
+        "Выберите действие:",
+        parse_mode="HTML",
+        reply_markup=main_menu(),
+    )
 
 
 @router.message(CommandStart())
