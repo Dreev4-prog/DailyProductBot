@@ -3,6 +3,7 @@ import html
 import logging
 import os
 import random
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -61,13 +62,11 @@ scheduler = AsyncIOScheduler(timezone=TZ)
 
 
 class AddProduct(StatesGroup):
-    title = State()
     category = State()
+    title = State()
     description = State()
-    buy_price = State()
-    sell_price = State()
-    marketplaces = State()
     image = State()
+    price = State()
 
 
 class PromoInput(StatesGroup):
@@ -76,6 +75,11 @@ class PromoInput(StatesGroup):
 
 class BroadcastInput(StatesGroup):
     content = State()
+
+
+class PreferencesInput(StatesGroup):
+    categories = State()
+    budget = State()
 
 
 def ts_now() -> int:
@@ -99,8 +103,9 @@ def client_menu() -> ReplyKeyboardMarkup:
         keyboard=[
             [KeyboardButton(text="🔥 Получить товары")],
             [KeyboardButton(text="💎 Купить доступ"), KeyboardButton(text="👤 Профиль")],
-            [KeyboardButton(text="📚 Мой архив"), KeyboardButton(text="🎁 Пригласить друга")],
-            [KeyboardButton(text="🎟 Промокод"), KeyboardButton(text="💬 Поддержка")],
+            [KeyboardButton(text="📚 Мой архив"), KeyboardButton(text="⚙️ Мои настройки")],
+            [KeyboardButton(text="🎁 Пригласить друга"), KeyboardButton(text="🎟 Промокод")],
+            [KeyboardButton(text="💬 Поддержка")],
         ],
         resize_keyboard=True,
         input_field_placeholder="Выберите раздел DT Team",
@@ -151,7 +156,11 @@ async def init_db() -> None:
             description TEXT NOT NULL,
             buy_price TEXT NOT NULL,
             sell_price TEXT NOT NULL,
+            buy_price_num REAL,
+            sell_price_num REAL,
             marketplaces TEXT NOT NULL,
+            german_title TEXT NOT NULL DEFAULT '',
+            german_description TEXT NOT NULL DEFAULT '',
             file_id TEXT NOT NULL,
             file_type TEXT NOT NULL,
             active INTEGER NOT NULL DEFAULT 1,
@@ -193,6 +202,22 @@ async def init_db() -> None:
             user_id INTEGER NOT NULL,
             used_at INTEGER NOT NULL,
             PRIMARY KEY(code, user_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS user_preferences (
+            user_id INTEGER PRIMARY KEY,
+            categories TEXT NOT NULL DEFAULT '',
+            budget_min REAL,
+            budget_max REAL,
+            updated_at INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS product_feedback (
+            user_id INTEGER NOT NULL,
+            product_id INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            PRIMARY KEY(user_id, product_id)
         );
         """)
         await db.commit()
@@ -286,47 +311,116 @@ async def reward_referrer(user_id: int) -> None:
         pass
 
 
+
+def parse_price_number(text: str) -> float | None:
+    cleaned = text.replace("€", "").replace("$", "").replace("USDT", "").replace(" ", "").replace(",", ".")
+    match = re.search(r"\d+(?:\.\d+)?", cleaned)
+    return float(match.group()) if match else None
+
+
+async def get_preferences(user_id: int) -> tuple[list[str], float | None, float | None]:
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        row = await (await db.execute(
+            "SELECT categories, budget_min, budget_max FROM user_preferences WHERE user_id=?",
+            (user_id,)
+        )).fetchone()
+    if not row:
+        return [], None, None
+    categories = [x.strip() for x in (row[0] or "").split(",") if x.strip()]
+    return categories, row[1], row[2]
+
+
+async def save_preferences(user_id: int, categories: list[str], budget_min: float | None, budget_max: float | None) -> None:
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        await db.execute("""
+            INSERT INTO user_preferences(user_id, categories, budget_min, budget_max, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                categories=excluded.categories,
+                budget_min=excluded.budget_min,
+                budget_max=excluded.budget_max,
+                updated_at=excluded.updated_at
+        """, (user_id, ",".join(categories), budget_min, budget_max, ts_now()))
+        await db.commit()
+
+
 async def choose_products_for_user(user_id: int, amount: int) -> list[aiosqlite.Row]:
+    categories, budget_min, budget_max = await get_preferences(user_id)
+
+    query = """
+        SELECT p.*
+        FROM product_pool p
+        WHERE p.active=1
+          AND NOT EXISTS (
+              SELECT 1 FROM daily_assignments a
+              WHERE a.user_id=? AND a.product_id=p.id
+          )
+    """
+    params: list[Any] = [user_id]
+
+    if categories:
+        placeholders = ",".join("?" for _ in categories)
+        query += f" AND p.category IN ({placeholders})"
+        params.extend(categories)
+
+    if budget_min is not None:
+        query += " AND (p.buy_price_num IS NULL OR p.buy_price_num>=?)"
+        params.append(budget_min)
+
+    if budget_max is not None:
+        query += " AND (p.buy_price_num IS NULL OR p.buy_price_num<=?)"
+        params.append(budget_max)
+
     async with aiosqlite.connect(DATABASE_PATH) as db:
         db.row_factory = aiosqlite.Row
-        available = await (await db.execute("""
-            SELECT p.*
-            FROM product_pool p
-            WHERE p.active=1
-              AND NOT EXISTS (
-                  SELECT 1 FROM daily_assignments a
-                  WHERE a.user_id=? AND a.product_id=p.id
-              )
-        """, (user_id,))).fetchall()
+        available = await (await db.execute(query, params)).fetchall()
 
-        if not available:
-            return []
+        # Fallback: if filters are too narrow, use any unseen active products.
+        if len(available) < amount:
+            available = await (await db.execute("""
+                SELECT p.*
+                FROM product_pool p
+                WHERE p.active=1
+                  AND NOT EXISTS (
+                      SELECT 1 FROM daily_assignments a
+                      WHERE a.user_id=? AND a.product_id=p.id
+                  )
+            """, (user_id,))).fetchall()
 
-        selected = random.sample(available, min(amount, len(available)))
-        return selected
+    if not available:
+        return []
+    return random.sample(available, min(amount, len(available)))
 
 
 def product_caption(product) -> str:
     return (
-        f"⚡️ <b>DT TEAM — ПЕРСОНАЛЬНЫЙ ТОВАР</b>\n"
+        "⚡️ <b>DT TEAM — ПЕРСОНАЛЬНЫЙ ТОВАР</b>\n"
         "━━━━━━━━━━━━━━━━━━\n"
         f"📦 <b>{html.escape(product['title'])}</b>\n"
         f"🏷 Категория: <b>{html.escape(product['category'])}</b>\n\n"
         f"{html.escape(product['description'])}\n\n"
-        f"💰 <b>Закупка:</b> {html.escape(product['buy_price'])}\n"
-        f"📈 <b>Продажа:</b> {html.escape(product['sell_price'])}\n"
-        f"🛒 <b>Где продавать:</b> {html.escape(product['marketplaces'])}\n\n"
+        f"💰 <b>Цена:</b> {html.escape(product['sell_price'])}\n\n"
         "🚀 <i>Персональная выдача DT Team</i>"
     )
+
+
+def feedback_keyboard(product_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ Продал", callback_data=f"fb:sold:{product_id}"),
+            InlineKeyboardButton(text="🕐 Ещё продаю", callback_data=f"fb:selling:{product_id}")
+        ],
+        [InlineKeyboardButton(text="❌ Не подошёл", callback_data=f"fb:skip:{product_id}")]
+    ])
 
 
 async def send_product(user_id: int, product) -> bool:
     try:
         caption = product_caption(product)
         if product["file_type"] == "document":
-            await bot.send_document(user_id, product["file_id"], caption=caption, parse_mode="HTML")
+            await bot.send_document(user_id, product["file_id"], caption=caption, parse_mode="HTML", reply_markup=feedback_keyboard(product["id"]))
         else:
-            await bot.send_photo(user_id, product["file_id"], caption=caption, parse_mode="HTML")
+            await bot.send_photo(user_id, product["file_id"], caption=caption, parse_mode="HTML", reply_markup=feedback_keyboard(product["id"]))
 
         async with aiosqlite.connect(DATABASE_PATH) as db:
             await db.execute("""
@@ -611,6 +705,88 @@ async def archive_handler(message: Message) -> None:
             await bot.send_photo(message.from_user.id, product["file_id"], caption=caption, parse_mode="HTML")
 
 
+
+@router.message(F.text == "⚙️ Мои настройки")
+async def settings_handler(message: Message, state: FSMContext) -> None:
+    await state.set_state(PreferencesInput.categories)
+    await message.answer(
+        "Введите интересующие категории через запятую.\n"
+        "Например: Apple, Игры, ПК\n\n"
+        "Чтобы получать товары из всех категорий, отправьте: Все"
+    )
+
+
+@router.message(PreferencesInput.categories)
+async def preferences_categories(message: Message, state: FSMContext) -> None:
+    text = (message.text or "").strip()
+    categories = [] if text.lower() == "все" else [x.strip() for x in text.split(",") if x.strip()]
+    await state.update_data(categories=categories)
+    await state.set_state(PreferencesInput.budget)
+    await message.answer(
+        "Введите бюджет закупки в формате:\n"
+        "100-200\n\n"
+        "Или отправьте: Без ограничений"
+    )
+
+
+@router.message(PreferencesInput.budget)
+async def preferences_budget(message: Message, state: FSMContext) -> None:
+    text = (message.text or "").strip().lower()
+    budget_min = budget_max = None
+
+    if text != "без ограничений":
+        match = re.match(r"\s*(\d+(?:[.,]\d+)?)\s*-\s*(\d+(?:[.,]\d+)?)\s*$", text)
+        if not match:
+            await message.answer("Неверный формат. Пример: 100-200 или «Без ограничений».")
+            return
+        budget_min = float(match.group(1).replace(",", "."))
+        budget_max = float(match.group(2).replace(",", "."))
+        if budget_min > budget_max:
+            budget_min, budget_max = budget_max, budget_min
+
+    data = await state.get_data()
+    await save_preferences(message.from_user.id, data.get("categories", []), budget_min, budget_max)
+    await state.clear()
+
+    categories_text = ", ".join(data.get("categories", [])) or "все"
+    budget_text = "без ограничений" if budget_min is None else f"{budget_min:g}–{budget_max:g} €"
+    await message.answer(
+        header("НАСТРОЙКИ СОХРАНЕНЫ") +
+        f"\nКатегории: <b>{html.escape(categories_text)}</b>\n"
+        f"Бюджет закупки: <b>{budget_text}</b>",
+        parse_mode="HTML"
+    )
+
+
+@router.callback_query(F.data.startswith("fb:"))
+async def feedback_handler(callback: CallbackQuery) -> None:
+    _, status, product_id_raw = callback.data.split(":", 2)
+    if not product_id_raw.isdigit():
+        await callback.answer()
+        return
+
+    labels = {
+        "sold": "Продал",
+        "selling": "Ещё продаю",
+        "skip": "Не подошёл"
+    }
+    if status not in labels:
+        await callback.answer()
+        return
+
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        await db.execute("""
+            INSERT INTO product_feedback(user_id, product_id, status, created_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(user_id, product_id) DO UPDATE SET
+                status=excluded.status,
+                created_at=excluded.created_at
+        """, (callback.from_user.id, int(product_id_raw), status, ts_now()))
+        await db.commit()
+
+    await callback.answer(f"Отмечено: {labels[status]}", show_alert=True)
+
+
 @router.message(F.text == "🎁 Пригласить друга")
 async def referral_handler(message: Message) -> None:
     me = await bot.get_me()
@@ -677,15 +853,15 @@ async def add_product_callback(callback: CallbackQuery, state: FSMContext) -> No
     if not is_admin(callback.from_user.id):
         return
     await callback.answer()
-    await state.set_state(AddProduct.title)
-    await bot.send_message(callback.from_user.id, "Название товара:")
+    await state.set_state(AddProduct.category)
+    await bot.send_message(callback.from_user.id, "Категория товара:")
 
 
 @router.message(Command("addproduct"))
 async def add_product_command(message: Message, state: FSMContext) -> None:
     if is_admin(message.from_user.id):
-        await state.set_state(AddProduct.title)
-        await message.answer("Название товара:")
+        await state.set_state(AddProduct.category)
+        await message.answer("Категория товара:")
 
 
 async def text_step(message: Message, state: FSMContext, key: str, next_state: State, prompt: str) -> None:
@@ -697,30 +873,19 @@ async def text_step(message: Message, state: FSMContext, key: str, next_state: S
     await message.answer(prompt)
 
 
-@router.message(AddProduct.title)
-async def add_title(m: Message, s: FSMContext):
-    await text_step(m, s, "title", AddProduct.category, "Категория, например: Apple / Игры / ПК:")
-
 @router.message(AddProduct.category)
 async def add_category(m: Message, s: FSMContext):
-    await text_step(m, s, "category", AddProduct.description, "Описание:")
+    await text_step(m, s, "category", AddProduct.title, "Название товара:")
+
+
+@router.message(AddProduct.title)
+async def add_title(m: Message, s: FSMContext):
+    await text_step(m, s, "title", AddProduct.description, "Описание товара:")
+
 
 @router.message(AddProduct.description)
 async def add_description(m: Message, s: FSMContext):
-    await text_step(m, s, "description", AddProduct.buy_price, "Цена закупки:")
-
-@router.message(AddProduct.buy_price)
-async def add_buy(m: Message, s: FSMContext):
-    await text_step(m, s, "buy_price", AddProduct.sell_price, "Рекомендуемая цена продажи:")
-
-@router.message(AddProduct.sell_price)
-async def add_sell(m: Message, s: FSMContext):
-    await text_step(m, s, "sell_price", AddProduct.marketplaces, "Где продавать / рекомендации:")
-
-@router.message(AddProduct.marketplaces)
-async def add_marketplaces(m: Message, s: FSMContext):
-    await text_step(m, s, "marketplaces", AddProduct.image, "Отправьте изображение:")
-
+    await text_step(m, s, "description", AddProduct.image, "Отправьте картинку товара:")
 
 def extract_file(message: Message):
     if message.photo:
@@ -734,23 +899,60 @@ def extract_file(message: Message):
 async def add_image(message: Message, state: FSMContext) -> None:
     file_data = extract_file(message)
     if not file_data:
-        await message.answer("Отправьте изображение.")
+        await message.answer("Отправьте картинку товара.")
         return
+
+    await state.update_data(file_id=file_data[0], file_type=file_data[1])
+    await state.set_state(AddProduct.price)
+    await message.answer("Цена товара:")
+
+
+@router.message(AddProduct.image)
+async def add_image_wrong(message: Message) -> None:
+    await message.answer("Нужно отправить картинку как фото или файл.")
+
+
+@router.message(AddProduct.price)
+async def add_price(message: Message, state: FSMContext) -> None:
+    if not message.text:
+        await message.answer("Отправьте цену текстом.")
+        return
+
     data = await state.get_data()
+    price_text = message.text.strip()
+    price_num = parse_price_number(price_text)
+
     async with aiosqlite.connect(DATABASE_PATH) as db:
         await db.execute("""
             INSERT INTO product_pool(
-                title, category, description, buy_price, sell_price,
-                marketplaces, file_id, file_type, active, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+                title, category, description,
+                buy_price, sell_price,
+                buy_price_num, sell_price_num,
+                marketplaces, german_title, german_description,
+                file_id, file_type, active, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
         """, (
-            data["title"], data["category"], data["description"],
-            data["buy_price"], data["sell_price"], data["marketplaces"],
-            file_data[0], file_data[1], ts_now()
+            data["title"],
+            data["category"],
+            data["description"],
+            price_text,
+            price_text,
+            price_num,
+            price_num,
+            "-",
+            "",
+            "",
+            data["file_id"],
+            data["file_type"],
+            ts_now()
         ))
         await db.commit()
+
     await state.clear()
-    await message.answer("✅ Товар добавлен в общую базу.", reply_markup=admin_menu())
+    await message.answer(
+        "✅ Товар добавлен в базу.",
+        reply_markup=admin_menu()
+    )
 
 
 @router.callback_query(F.data == "adm:pool")
@@ -781,6 +983,8 @@ async def stats_text() -> str:
         )).fetchone())[0]
         pool = (await (await db.execute("SELECT COUNT(*) FROM product_pool WHERE active=1")).fetchone())[0]
         assignments = (await (await db.execute("SELECT COUNT(*) FROM daily_assignments")).fetchone())[0]
+        sold = (await (await db.execute("SELECT COUNT(*) FROM product_feedback WHERE status='sold'")).fetchone())[0]
+        skipped = (await (await db.execute("SELECT COUNT(*) FROM product_feedback WHERE status='skip'")).fetchone())[0]
     return (
         header("АНАЛИТИКА") +
         f"\n👥 Пользователей: <b>{users}</b>\n"
@@ -788,7 +992,9 @@ async def stats_text() -> str:
         f"💳 Оплат: <b>{paid}</b>\n"
         f"💰 Выручка: <b>{revenue:g} USDT</b>\n"
         f"📦 Товаров в базе: <b>{pool}</b>\n"
-        f"🎲 Персональных выдач: <b>{assignments}</b>"
+        f"🎲 Персональных выдач: <b>{assignments}</b>\n"
+        f"✅ Отметок «Продал»: <b>{sold}</b>\n"
+        f"❌ Отметок «Не подошёл»: <b>{skipped}</b>"
     )
 
 
