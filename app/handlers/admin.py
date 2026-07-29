@@ -5,7 +5,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message, InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.config import settings
-from app.database import connect, now_ts
+from app.database import connect, now_ts, get_bot_setting, set_bot_setting
 import sqlite3
 from app.keyboards import admin_menu, category_keyboard, PRODUCT_CATEGORIES
 from app.services.access import activate_access
@@ -39,6 +39,10 @@ class AddAdmin(StatesGroup):
     user_id = State()
 
 
+class EditWelcome(StatesGroup):
+    text = State()
+
+
 def admin_only(user_id: int) -> bool:
     if user_id in settings.admin_ids:
         return True
@@ -55,6 +59,7 @@ def admin_only(user_id: int) -> bool:
 
 def admin_settings_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✏️ Приветственный текст", callback_data="admin:welcome_text")],
         [InlineKeyboardButton(text="👤 Администраторы", callback_data="admin:admins")],
         [InlineKeyboardButton(text="💳 Проверить платежи", callback_data="admin:payment_status")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin:panel")],
@@ -185,6 +190,44 @@ async def admin_settings(callback: CallbackQuery) -> None:
     await callback.message.answer(
         "⚙️ <b>Настройки</b>\n\nВыберите раздел:",
         parse_mode="HTML",
+        reply_markup=admin_settings_keyboard(),
+    )
+
+
+@router.callback_query(F.data == "admin:welcome_text")
+async def welcome_text_start(callback: CallbackQuery, state: FSMContext) -> None:
+    if not admin_only(callback.from_user.id):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    current = await get_bot_setting("welcome_text", "Используется стандартный текст.")
+    await state.set_state(EditWelcome.text)
+    await callback.answer()
+    await callback.message.answer(
+        "✏️ <b>Изменение приветствия</b>\n\n"
+        "Текущий текст:\n\n" + current +
+        "\n\nОтправьте новое приветственное сообщение одним сообщением. "
+        "Оно будет показываться под баннером при /start.\n\n"
+        "Для отмены используйте /cancel.",
+        parse_mode="HTML",
+    )
+
+
+@router.message(EditWelcome.text)
+async def welcome_text_save(message: Message, state: FSMContext) -> None:
+    if not admin_only(message.from_user.id):
+        await state.clear()
+        return
+    text = (message.text or "").strip()
+    if len(text) < 20:
+        await message.answer("Текст слишком короткий. Отправьте приветствие длиной от 20 символов.")
+        return
+    if len(text) > 3500:
+        await message.answer("Текст слишком длинный. Максимум — 3500 символов.")
+        return
+    await set_bot_setting("welcome_text", text)
+    await state.clear()
+    await message.answer(
+        "✅ Приветственный текст сохранён. Проверьте его командой /start.",
         reply_markup=admin_settings_keyboard(),
     )
 

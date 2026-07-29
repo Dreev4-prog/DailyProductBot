@@ -126,12 +126,48 @@ async def init_db() -> None:
             failed_count INTEGER NOT NULL DEFAULT 0,
             created_at INTEGER NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS bot_settings (
+            setting_key TEXT PRIMARY KEY,
+            setting_value TEXT NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
         """)
 
         columns = await (await db.execute("PRAGMA table_info(products)")).fetchall()
         column_names = {row["name"] for row in columns}
         if "deleted_at" not in column_names:
             await db.execute("ALTER TABLE products ADD COLUMN deleted_at INTEGER")
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def get_bot_setting(key: str, default: str = "") -> str:
+    db = await connect()
+    try:
+        row = await (await db.execute(
+            "SELECT setting_value FROM bot_settings WHERE setting_key=?",
+            (key,),
+        )).fetchone()
+        return str(row["setting_value"]) if row else default
+    finally:
+        await db.close()
+
+
+async def set_bot_setting(key: str, value: str) -> None:
+    db = await connect()
+    try:
+        await db.execute(
+            """
+            INSERT INTO bot_settings(setting_key, setting_value, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(setting_key) DO UPDATE SET
+                setting_value=excluded.setting_value,
+                updated_at=excluded.updated_at
+            """,
+            (key, value, now_ts()),
+        )
         await db.commit()
     finally:
         await db.close()

@@ -1,4 +1,9 @@
 {
-  "version": "3.0",
-  "name": "Complete Admin Panel"
+  "version": "3.2",
+  "name": "Editable Welcome",
+  "changes": [
+    "editable welcome text in admin panel",
+    "user-provided default welcome message",
+    "persistent bot_settings table"
+  ]
 }

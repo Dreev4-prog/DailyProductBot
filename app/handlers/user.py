@@ -8,7 +8,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, FSInputFile, Message, ReplyKeyboardRemove
 
 from app.config import settings
-from app.database import connect, now_ts
+from app.database import connect, now_ts, get_bot_setting
 from app.keyboards import payment_methods, main_menu, user_category_keyboard, PRODUCT_CATEGORIES
 from app.services.products import already_today, has_access, issue_one_product
 from app.utils import brand_header, product_caption
@@ -78,16 +78,27 @@ async def send_home(message_or_callback) -> None:
         reply_markup=ReplyKeyboardRemove(),
     )
 
+    default_welcome = (
+        "⚡ Добро пожаловать в DT TEAM!\n\n"
+        "DT TEAM — это закрытый сервис по поиску товаров для работы\n\n"
+        "Каждый день наша команда подбирает перспективные товары, которые можно выгодно выкладывать\n\n"
+        "Внутри вы получаете:\n\n"
+        "📦 2 новых товара ежедневно.\n"
+        "🎲 Случайную выдачу без повторов.\n"
+        "💰 Возможность выбирать категорию:\n"
+        "• 50–100 €\n"
+        "• 100–200 €\n"
+        "• 200–500 €\n\n"
+        "🔥 За одну подписку вы получаете до 10 уникальных товаров.\n\n"
+        "💎 Доступ: 5 дней\n"
+        "💰 Стоимость: 20 USDT\n\n"
+        "Желаем успешных продаж! 🚀"
+    )
+    welcome_text = await get_bot_setting("welcome_text", default_welcome)
+
     await send_banner_message(
         target,
-        "⚡️ <b>DT TEAM</b>\n"
-        "━━━━━━━━━━━━━━━━━━\n"
-        "🚀 <b>ТОВАРЫ ДЛЯ ПЕРЕПРОДАЖИ</b>\n\n"
-        f"Каждый день вы получаете <b>{settings.products_per_day} персональных товара</b> "
-        "без повторов.\n\n"
-        f"💎 Доступ: <b>{settings.access_days} дней</b>\n"
-        f"💰 Стоимость: <b>{settings.price_usdt} USDT</b>\n\n"
-        "Выберите действие:",
+        html.escape(welcome_text),
         reply_markup=main_menu(),
     )
 
