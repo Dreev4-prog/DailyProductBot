@@ -20,6 +20,7 @@ class Settings:
         if x.strip().isdigit()
     )
     database_path: Path = Path(os.getenv("DATABASE_PATH", "/app/data/dt_team_v2.db"))
+    banner_path: Path = Path(os.getenv("BANNER_PATH", "assets/dt_products_banner.jpg"))
 
     brand_name: str = os.getenv("BRAND_NAME", "DT Team")
     support_username: str = os.getenv("SUPPORT_USERNAME", "@support")

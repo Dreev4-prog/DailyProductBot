@@ -2,6 +2,7 @@ import asyncio
 import logging
 
 import uvicorn
+from aiogram.types import BotCommand, BotCommandScopeDefault, MenuButtonCommands
 
 from app.bot import bot, dp
 from app.core import scheduler
@@ -12,8 +13,18 @@ from app.services.scheduler import configure_scheduler
 from app.web.app import web_app
 
 
+async def configure_telegram_menu() -> None:
+    commands = [
+        BotCommand(command="start", description="Открыть главное меню"),
+        BotCommand(command="admin", description="Админ-панель"),
+    ]
+    await bot.set_my_commands(commands, scope=BotCommandScopeDefault())
+    await bot.set_chat_menu_button(menu_button=MenuButtonCommands())
+
+
 async def run_bot() -> None:
     await init_db()
+    await configure_telegram_menu()
     await validate_payment_connections()
     configure_scheduler()
     scheduler.start()

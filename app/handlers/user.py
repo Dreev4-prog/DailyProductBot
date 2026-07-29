@@ -5,7 +5,7 @@ from aiogram import F, Router
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, Message, ReplyKeyboardRemove
+from aiogram.types import CallbackQuery, FSInputFile, Message, ReplyKeyboardRemove
 
 from app.config import settings
 from app.database import connect, now_ts
@@ -23,6 +23,28 @@ class Preferences(StatesGroup):
 
 class Promo(StatesGroup):
     code = State()
+
+
+async def send_banner_message(target: Message, caption: str, reply_markup=None) -> None:
+    """Send the branded DT banner above each main section."""
+    try:
+        if settings.banner_path.exists():
+            await target.answer_photo(
+                photo=FSInputFile(settings.banner_path),
+                caption=caption,
+                parse_mode="HTML",
+                reply_markup=reply_markup,
+            )
+            return
+    except Exception:
+        # The interface must remain usable even if the image file is unavailable.
+        pass
+
+    await target.answer(
+        caption,
+        parse_mode="HTML",
+        reply_markup=reply_markup,
+    )
 
 
 async def register(message: Message, referrer_id: int | None = None) -> None:
@@ -56,7 +78,8 @@ async def send_home(message_or_callback) -> None:
         reply_markup=ReplyKeyboardRemove(),
     )
 
-    await target.answer(
+    await send_banner_message(
+        target,
         "⚡️ <b>DT TEAM</b>\n"
         "━━━━━━━━━━━━━━━━━━\n"
         "🚀 <b>ТОВАРЫ ДЛЯ ПЕРЕПРОДАЖИ</b>\n\n"
@@ -65,7 +88,6 @@ async def send_home(message_or_callback) -> None:
         f"💎 Доступ: <b>{settings.access_days} дней</b>\n"
         f"💰 Стоимость: <b>{settings.price_usdt} USDT</b>\n\n"
         "Выберите действие:",
-        parse_mode="HTML",
         reply_markup=main_menu(),
     )
 
@@ -92,22 +114,22 @@ async def menu_buy(callback: CallbackQuery) -> None:
     if not settings.crypto_pay_enabled and not settings.xrocket_enabled:
         await callback.message.answer("Оплата временно недоступна.")
         return
-    await callback.message.answer(
+    await send_banner_message(
+        callback.message,
         "⚡️ <b>DT TEAM — ОПЛАТА</b>\n"
         "━━━━━━━━━━━━━━━━━━\n"
         f"Сумма: <b>{settings.price_usdt} USDT</b>\n\n"
         "Выберите удобный способ оплаты:",
-        parse_mode="HTML",
         reply_markup=payment_methods(),
     )
 
 
 async def show_category_choice(target, user_id: int) -> None:
     if not await has_access(user_id):
-        await target.answer(
+        await send_banner_message(
+            target,
             "🔒 <b>Активного доступа нет</b>\n\n"
             "Оформите доступ, чтобы получать персональные товары.",
-            parse_mode="HTML",
             reply_markup=payment_methods(),
         )
         return
@@ -115,20 +137,20 @@ async def show_category_choice(target, user_id: int) -> None:
     received = await already_today(user_id)
     remaining = max(0, settings.products_per_day - received)
     if remaining == 0:
-        await target.answer(
+        await send_banner_message(
+            target,
             "✅ <b>Сегодня вы уже получили 2 товара.</b>\n\n"
             "Новый лимит откроется завтра в 00:00.",
-            parse_mode="HTML",
             reply_markup=main_menu(),
         )
         return
 
-    await target.answer(
+    await send_banner_message(
+        target,
         "🎁 <b>Выберите категорию товара</b>\n\n"
         f"Сегодня получено: <b>{received} / {settings.products_per_day}</b>\n"
         f"Осталось: <b>{remaining}</b>\n\n"
         "После выбора бот случайно выдаст один новый товар.",
-        parse_mode="HTML",
         reply_markup=user_category_keyboard(),
     )
 
@@ -206,14 +228,14 @@ async def menu_profile(callback: CallbackQuery) -> None:
 
     active = bool(user and user["access_until"] > now_ts())
     until = datetime.fromtimestamp(user["access_until"], settings.timezone).strftime("%d.%m.%Y %H:%M") if active else "—"
-    await callback.message.answer(
+    await send_banner_message(
+        callback.message,
         "⚡️ <b>DT TEAM — ПРОФИЛЬ</b>\n"
         "━━━━━━━━━━━━━━━━━━\n"
         f"Статус: <b>{'активен' if active else 'нет доступа'}</b>\n"
         f"Доступ до: <b>{until}</b>\n"
         f"Получено товаров: <b>{count['c']}</b>\n"
         f"Продано: <b>{sold['c']}</b>",
-        parse_mode="HTML",
         reply_markup=main_menu(),
     )
 
@@ -239,8 +261,9 @@ async def menu_favorites(callback: CallbackQuery) -> None:
 @router.callback_query(F.data == "menu:support")
 async def menu_support(callback: CallbackQuery) -> None:
     await callback.answer()
-    await callback.message.answer(
-        f"💬 Поддержка: {settings.support_username}",
+    await send_banner_message(
+        callback.message,
+        f"💬 <b>DT TEAM — ПОДДЕРЖКА</b>\n\nСвязь: {settings.support_username}",
         reply_markup=main_menu(),
     )
 
@@ -290,6 +313,11 @@ async def profile(message: Message) -> None:
 
 
 async def show_collection(message: Message, query: str, params: tuple) -> None:
+    await send_banner_message(
+        message,
+        "📚 <b>DT TEAM — ВАШИ ТОВАРЫ</b>\n\nНиже показаны сохранённые позиции.",
+        reply_markup=main_menu(),
+    )
     db = await connect()
     try:
         rows = await (await db.execute(query, params)).fetchall()
