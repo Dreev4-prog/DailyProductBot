@@ -19,7 +19,10 @@ class Settings:
         int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",")
         if x.strip().isdigit()
     )
-    database_path: Path = Path(os.getenv("DATABASE_PATH", "/app/data/dt_team_v2.db"))
+    database_url: str = os.getenv("DATABASE_URL", "").strip()
+    database_pool_size: int = int(os.getenv("DATABASE_POOL_SIZE", "5"))
+    sqlite_migration_path: Path = Path(os.getenv("SQLITE_MIGRATION_PATH", "/app/data/dt_team_v2.db"))
+    migrate_sqlite_on_start: bool = flag("MIGRATE_SQLITE_ON_START", True)
     banner_path: Path = Path(os.getenv("BANNER_PATH", "assets/dt_products_banner.jpg"))
 
     brand_name: str = os.getenv("BRAND_NAME", "DT Team")

@@ -1,11 +1,5 @@
 {
-  "version": "3.3",
-  "name": "DT Team 3.3 Multi-Image Products",
-  "changes": [
-    "1–6 изображений для каждого товара",
-    "галерея изображений в админ-панели",
-    "полный альбом при выдаче пользователю",
-    "замена или сохранение фотографий при редактировании",
-    "автоматическая миграция старых одиночных изображений"
-  ]
+  "version": "4.0.0",
+  "database": "PostgreSQL",
+  "features": ["multi-image-products", "editable-welcome", "postgresql", "sqlite-auto-migration"]
 }
