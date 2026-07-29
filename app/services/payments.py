@@ -9,7 +9,6 @@ from app.core import bot
 from app.config import settings
 from app.database import connect, now_ts
 from app.services.access import activate_access
-from app.services.products import issue_products
 from app.utils import brand_header
 
 
@@ -211,10 +210,10 @@ async def activate_paid(row) -> None:
         row["user_id"],
         brand_header("ДОСТУП АКТИВИРОВАН") +
         f"\n✅ Оплата через <b>{row['provider']}</b> подтверждена.\n"
-        f"Доступ активен на <b>{settings.access_days} дней</b>.",
+        f"Доступ активен на <b>{settings.access_days} дней</b>.\n\n"
+        "Нажмите «Получить товары» и выберите категорию для первого товара.",
         parse_mode="HTML",
     )
-    await issue_products(row["user_id"])
 
 
 async def check_crypto_invoices() -> None:

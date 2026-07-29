@@ -43,7 +43,6 @@ def admin_menu() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="➕ Добавить товар", callback_data="admin:add")],
         [InlineKeyboardButton(text="📦 База товаров", callback_data="admin:products")],
         [InlineKeyboardButton(text="👥 Пользователи", callback_data="admin:users")],
-        [InlineKeyboardButton(text="🎲 Раздать сейчас", callback_data="admin:send")],
         [InlineKeyboardButton(text="📊 Аналитика", callback_data="admin:stats")],
         [InlineKeyboardButton(text="📣 Рассылка", callback_data="admin:broadcast")],
     ])
@@ -60,4 +59,26 @@ def product_actions(product_id: int) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="❌ Не подошёл", callback_data=f"feedback:skip:{product_id}"),
         ],
         [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu:home")],
+    ])
+
+
+PRODUCT_CATEGORIES = {
+    "50_100": "50–100 €",
+    "100_200": "100–200 €",
+    "200_500": "200–500 €",
+}
+
+
+def category_keyboard(prefix: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💰 50–100 €", callback_data=f"{prefix}:50_100")],
+        [InlineKeyboardButton(text="💎 100–200 €", callback_data=f"{prefix}:100_200")],
+        [InlineKeyboardButton(text="👑 200–500 €", callback_data=f"{prefix}:200_500")],
+    ])
+
+
+def user_category_keyboard() -> InlineKeyboardMarkup:
+    rows = category_keyboard("getcat").inline_keyboard
+    return InlineKeyboardMarkup(inline_keyboard=rows + [
+        [InlineKeyboardButton(text="⬅️ Главное меню", callback_data="menu:home")],
     ])

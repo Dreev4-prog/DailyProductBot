@@ -1,16 +1,12 @@
 {
-  "version": "2.1.0-stable",
-  "python_files_checked": 19,
-  "checks": {
-    "start_handler": true,
-    "send_home": true,
-    "inline_menu": true,
-    "xrocket_button": true,
-    "product_edit": true,
-    "product_delete": true,
-    "trash": true,
-    "web_trash": true,
-    "xrocket_app_info": true,
-    "core_bot": true
+  "version": "2.2.0-category-choice",
+  "features": {
+    "admin_category_buttons": true,
+    "user_category_choice_each_product": true,
+    "products_per_day": 2,
+    "daily_reset_at_midnight": true,
+    "no_repeat_per_user": true,
+    "manual_user_delivery": true,
+    "xrocket_official_api": true
   }
 }

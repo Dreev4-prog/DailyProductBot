@@ -9,8 +9,8 @@ from aiogram.types import CallbackQuery, Message, ReplyKeyboardRemove
 
 from app.config import settings
 from app.database import connect, now_ts
-from app.keyboards import payment_methods, main_menu
-from app.services.products import already_today, has_access, issue_products
+from app.keyboards import payment_methods, main_menu, user_category_keyboard, PRODUCT_CATEGORIES
+from app.services.products import already_today, has_access, issue_one_product
 from app.utils import brand_header, product_caption
 
 router = Router()
@@ -102,23 +102,91 @@ async def menu_buy(callback: CallbackQuery) -> None:
     )
 
 
-@router.callback_query(F.data == "menu:products")
-async def menu_products(callback: CallbackQuery) -> None:
-    await callback.answer()
-    if not await has_access(callback.from_user.id):
-        await callback.message.answer(
+async def show_category_choice(target, user_id: int) -> None:
+    if not await has_access(user_id):
+        await target.answer(
             "🔒 <b>Активного доступа нет</b>\n\n"
             "Оформите доступ, чтобы получать персональные товары.",
             parse_mode="HTML",
             reply_markup=payment_methods(),
         )
         return
-    sent = await issue_products(callback.from_user.id)
-    if not sent:
-        if await already_today(callback.from_user.id) >= settings.products_per_day:
-            await callback.message.answer("✅ Сегодняшние товары уже получены.", reply_markup=main_menu())
-        else:
-            await callback.message.answer("В базе пока недостаточно новых товаров.", reply_markup=main_menu())
+
+    received = await already_today(user_id)
+    remaining = max(0, settings.products_per_day - received)
+    if remaining == 0:
+        await target.answer(
+            "✅ <b>Сегодня вы уже получили 2 товара.</b>\n\n"
+            "Новый лимит откроется завтра в 00:00.",
+            parse_mode="HTML",
+            reply_markup=main_menu(),
+        )
+        return
+
+    await target.answer(
+        "🎁 <b>Выберите категорию товара</b>\n\n"
+        f"Сегодня получено: <b>{received} / {settings.products_per_day}</b>\n"
+        f"Осталось: <b>{remaining}</b>\n\n"
+        "После выбора бот случайно выдаст один новый товар.",
+        parse_mode="HTML",
+        reply_markup=user_category_keyboard(),
+    )
+
+
+@router.callback_query(F.data == "menu:products")
+async def menu_products(callback: CallbackQuery) -> None:
+    await callback.answer()
+    await show_category_choice(callback.message, callback.from_user.id)
+
+
+@router.callback_query(F.data.startswith("getcat:"))
+async def get_product_from_category(callback: CallbackQuery) -> None:
+    category_key = callback.data.split(":", 1)[1]
+    category = PRODUCT_CATEGORIES.get(category_key)
+    if not category:
+        await callback.answer("Неизвестная категория.", show_alert=True)
+        return
+
+    await callback.answer("Подбираю товар…")
+    result = await issue_one_product(callback.from_user.id, category)
+
+    if result == "no_access":
+        await callback.message.answer("Активного доступа нет.", reply_markup=payment_methods())
+        return
+    if result == "daily_limit":
+        await callback.message.answer(
+            "✅ Сегодня вы уже получили 2 товара. Следующая выдача — завтра.",
+            reply_markup=main_menu(),
+        )
+        return
+    if result == "empty":
+        await callback.message.answer(
+            f"В категории <b>{category}</b> пока нет новых товаров для вас. "
+            "Выберите другую категорию.",
+            parse_mode="HTML",
+            reply_markup=user_category_keyboard(),
+        )
+        return
+    if result == "failed":
+        await callback.message.answer("Не удалось отправить товар. Попробуйте ещё раз.")
+        return
+
+    received = await already_today(callback.from_user.id)
+    remaining = max(0, settings.products_per_day - received)
+    if remaining:
+        await callback.message.answer(
+            f"✅ Товар выдан. Сегодня остался ещё <b>{remaining}</b> товар.\n"
+            "Можно выбрать эту же или другую категорию.",
+            parse_mode="HTML",
+            reply_markup=user_category_keyboard(),
+        )
+    else:
+        await callback.message.answer(
+            "🎉 <b>Сегодняшний лимит исчерпан.</b>\n\n"
+            "Вы получили 2 товара. Следующая выдача станет доступна завтра в 00:00.",
+            parse_mode="HTML",
+            reply_markup=main_menu(),
+        )
 
 
 @router.callback_query(F.data == "menu:profile")
@@ -192,15 +260,7 @@ async def buy(message: Message) -> None:
 
 @router.message(F.text == "🔥 Получить товары")
 async def get_products(message: Message) -> None:
-    if not await has_access(message.from_user.id):
-        await message.answer("Активного доступа нет.", reply_markup=payment_methods())
-        return
-    sent = await issue_products(message.from_user.id)
-    if not sent:
-        if await already_today(message.from_user.id) >= settings.products_per_day:
-            await message.answer("Сегодняшние товары уже получены.")
-        else:
-            await message.answer("В базе пока недостаточно новых товаров.")
+    await show_category_choice(message, message.from_user.id)
 
 
 @router.message(F.text == "👤 Профиль")

@@ -6,9 +6,8 @@ from aiogram.types import CallbackQuery, Message, InlineKeyboardButton, InlineKe
 
 from app.config import settings
 from app.database import connect, now_ts
-from app.keyboards import admin_menu
+from app.keyboards import admin_menu, category_keyboard, PRODUCT_CATEGORIES
 from app.services.access import activate_access
-from app.services.products import daily_distribution
 from app.utils import brand_header, parse_price
 
 router = Router()
@@ -130,14 +129,28 @@ async def add_start(callback: CallbackQuery, state: FSMContext) -> None:
         return
     await callback.answer()
     await state.set_state(AddProduct.category)
-    await callback.message.answer("Категория товара:")
+    await callback.message.answer(
+        "Выберите ценовую категорию товара:",
+        reply_markup=category_keyboard("admin:addcat"),
+    )
+
+
+@router.callback_query(AddProduct.category, F.data.startswith("admin:addcat:"))
+async def add_category(callback: CallbackQuery, state: FSMContext) -> None:
+    category_key = callback.data.split(":", 2)[2]
+    category = PRODUCT_CATEGORIES.get(category_key)
+    if not category:
+        await callback.answer("Неизвестная категория.", show_alert=True)
+        return
+    await state.update_data(category=category)
+    await state.set_state(AddProduct.title)
+    await callback.answer()
+    await callback.message.answer(f"Категория: <b>{category}</b>\n\nНазвание товара:", parse_mode="HTML")
 
 
 @router.message(AddProduct.category)
-async def add_category(message: Message, state: FSMContext) -> None:
-    await state.update_data(category=(message.text or "").strip())
-    await state.set_state(AddProduct.title)
-    await message.answer("Название товара:")
+async def add_category_text_disabled(message: Message) -> None:
+    await message.answer("Выберите категорию кнопкой выше.")
 
 
 @router.message(AddProduct.title)
@@ -295,17 +308,33 @@ async def edit_product_start(callback: CallbackQuery, state: FSMContext) -> None
     await callback.answer()
     await callback.message.answer(
         f"✏️ Редактирование товара #{product_id}\n\n"
-        f"Текущая категория: {product['category']}\n\n"
-        "Введите новую категорию или отправьте «-», чтобы оставить прежнюю."
+        f"Текущая категория: <b>{product['category']}</b>\n\n"
+        "Выберите новую категорию или оставьте прежнюю:",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            *category_keyboard(f"admin:editcat:{product_id}").inline_keyboard,
+            [InlineKeyboardButton(text="➖ Оставить прежнюю", callback_data=f"admin:editcat:{product_id}:keep")],
+        ]),
     )
 
 
-@router.message(EditProduct.category)
-async def edit_category(message: Message, state: FSMContext) -> None:
-    value = (message.text or "").strip()
-    await state.update_data(category=None if value == "-" else value)
+@router.callback_query(EditProduct.category, F.data.startswith("admin:editcat:"))
+async def edit_category(callback: CallbackQuery, state: FSMContext) -> None:
+    parts = callback.data.split(":")
+    value = parts[-1]
+    category = None if value == "keep" else PRODUCT_CATEGORIES.get(value)
+    if value != "keep" and not category:
+        await callback.answer("Неизвестная категория.", show_alert=True)
+        return
+    await state.update_data(category=category)
     await state.set_state(EditProduct.title)
-    await message.answer("Введите новое название или «-», чтобы оставить прежнее.")
+    await callback.answer()
+    await callback.message.answer("Введите новое название или «-», чтобы оставить прежнее.")
+
+
+@router.message(EditProduct.category)
+async def edit_category_text_disabled(message: Message) -> None:
+    await message.answer("Выберите категорию кнопкой выше.")
 
 
 @router.message(EditProduct.title)
@@ -557,16 +586,19 @@ async def stats(callback: CallbackQuery) -> None:
 @router.callback_query(F.data == "admin:send")
 async def send_now(callback: CallbackQuery) -> None:
     if admin_only(callback.from_user.id):
-        await callback.answer("Запущено")
-        await daily_distribution()
-        await callback.message.answer("✅ Выдача завершена.")
+        await callback.answer()
+        await callback.message.answer(
+            "Автоматическая выдача отключена. Пользователи сами выбирают категорию "
+            "для каждого из двух товаров в день."
+        )
 
 
 @router.message(Command("sendtoday"))
 async def send_today(message: Message) -> None:
     if admin_only(message.from_user.id):
-        await daily_distribution()
-        await message.answer("✅ Выдача завершена.")
+        await message.answer(
+            "Автоматическая выдача отключена. Пользователи получают товары вручную."
+        )
 
 
 @router.callback_query(F.data == "admin:broadcast")
