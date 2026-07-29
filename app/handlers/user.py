@@ -11,6 +11,7 @@ from app.config import settings
 from app.database import connect, now_ts, get_bot_setting
 from app.keyboards import payment_methods, main_menu, user_category_keyboard, PRODUCT_CATEGORIES
 from app.services.products import already_today, has_access, issue_one_product
+from app.services.media import send_product_gallery
 from app.utils import brand_header, product_caption
 
 router = Router()
@@ -338,15 +339,12 @@ async def show_collection(message: Message, query: str, params: tuple) -> None:
         await message.answer("Здесь пока пусто.")
         return
     for product in rows[:20]:
-        kwargs = dict(
+        await send_product_gallery(message.bot, message.from_user.id, product["id"])
+        await message.bot.send_message(
             chat_id=message.from_user.id,
-            caption=product_caption(product),
+            text=product_caption(product),
             parse_mode="HTML",
         )
-        if product["image_type"] == "document":
-            await message.bot.send_document(document=product["image_file_id"], **kwargs)
-        else:
-            await message.bot.send_photo(photo=product["image_file_id"], **kwargs)
 
 
 @router.message(F.text == "📚 Архив")

@@ -1,9 +1,11 @@
 {
-  "version": "3.2",
-  "name": "Editable Welcome",
+  "version": "3.3",
+  "name": "DT Team 3.3 Multi-Image Products",
   "changes": [
-    "editable welcome text in admin panel",
-    "user-provided default welcome message",
-    "persistent bot_settings table"
+    "1–6 изображений для каждого товара",
+    "галерея изображений в админ-панели",
+    "полный альбом при выдаче пользователю",
+    "замена или сохранение фотографий при редактировании",
+    "автоматическая миграция старых одиночных изображений"
   ]
 }

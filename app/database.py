@@ -58,6 +58,16 @@ async def init_db() -> None:
             created_at INTEGER NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS product_images (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+            file_id TEXT NOT NULL,
+            image_type TEXT NOT NULL DEFAULT 'photo',
+            position INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL,
+            UNIQUE(product_id, position)
+        );
+
         CREATE TABLE IF NOT EXISTS assignments (
             user_id INTEGER NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
             product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
@@ -138,6 +148,16 @@ async def init_db() -> None:
         column_names = {row["name"] for row in columns}
         if "deleted_at" not in column_names:
             await db.execute("ALTER TABLE products ADD COLUMN deleted_at INTEGER")
+
+        # Переносим старую одиночную картинку в новую таблицу изображений.
+        await db.execute("""
+            INSERT OR IGNORE INTO product_images(
+                product_id, file_id, image_type, position, created_at
+            )
+            SELECT id, image_file_id, image_type, 0, created_at
+            FROM products
+            WHERE image_file_id <> ''
+        """)
         await db.commit()
     finally:
         await db.close()

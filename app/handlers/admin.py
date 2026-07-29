@@ -9,6 +9,7 @@ from app.database import connect, now_ts, get_bot_setting, set_bot_setting
 import sqlite3
 from app.keyboards import admin_menu, category_keyboard, PRODUCT_CATEGORIES
 from app.services.access import activate_access
+from app.services.media import get_product_images, save_product_images, send_product_gallery
 from app.utils import brand_header, parse_price
 
 router = Router()
@@ -123,6 +124,23 @@ def product_manage_keyboard(product_id: int, active: int, deleted: bool = False)
     ])
 
 
+def images_done_keyboard(prefix: str, count: int, allow_keep: bool = False) -> InlineKeyboardMarkup:
+    rows = []
+    if count > 0:
+        rows.append([InlineKeyboardButton(text=f"✅ Готово ({count}/6)", callback_data=f"{prefix}:done")])
+    if allow_keep:
+        rows.append([InlineKeyboardButton(text="➖ Оставить прежние фото", callback_data=f"{prefix}:keep")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def extract_image(message: Message):
+    if message.photo:
+        return {"file_id": message.photo[-1].file_id, "image_type": "photo"}
+    if message.document and (message.document.mime_type or "").startswith("image/"):
+        return {"file_id": message.document.file_id, "image_type": "document"}
+    return None
+
+
 async def fetch_product(product_id: int):
     db = await connect()
     try:
@@ -138,23 +156,21 @@ async def show_product_card(callback: CallbackQuery, product_id: int) -> None:
         return
 
     deleted = product["deleted_at"] is not None
+    image_count = await send_product_gallery(callback.bot, callback.from_user.id, product_id)
     card_text = (
         f"📦 <b>Товар #{product['id']}</b>\n\n"
         f"Категория: <b>{product['category']}</b>\n"
         f"Название: <b>{product['title']}</b>\n"
         f"Описание: {product['description']}\n"
         f"Цена: <b>{product['price_text']}</b>\n"
+        f"Фотографий: <b>{image_count}</b>\n"
         f"Статус: <b>{'В корзине' if deleted else ('Активен' if product['active'] else 'Скрыт')}</b>"
     )
 
     await callback.message.answer(
         card_text,
         parse_mode="HTML",
-        reply_markup=product_manage_keyboard(
-            product["id"],
-            product["active"],
-            deleted,
-        ),
+        reply_markup=product_manage_keyboard(product["id"], product["active"], deleted),
     )
 
 
@@ -410,50 +426,81 @@ async def add_title(message: Message, state: FSMContext) -> None:
 
 @router.message(AddProduct.description)
 async def add_description(message: Message, state: FSMContext) -> None:
-    await state.update_data(description=(message.text or "").strip())
+    await state.update_data(description=(message.text or "").strip(), images=[])
     await state.set_state(AddProduct.image)
-    await message.answer("Отправьте картинку товара:")
+    await message.answer(
+        "📸 Отправьте от 1 до 6 фотографий товара по одной или сразу альбомом.\n\n"
+        "Когда закончите, нажмите «✅ Готово». Лучше отправлять именно как фото, "
+        "чтобы они отображались полноценным альбомом."
+    )
 
 
 @router.message(AddProduct.image, F.photo | F.document)
 async def add_image(message: Message, state: FSMContext) -> None:
-    if message.photo:
-        file_id, image_type = message.photo[-1].file_id, "photo"
-    elif message.document and (message.document.mime_type or "").startswith("image/"):
-        file_id, image_type = message.document.file_id, "document"
-    else:
-        await message.answer("Нужно отправить изображение.")
+    image = extract_image(message)
+    if not image:
+        await message.answer("Нужно отправить изображение как фото или графический файл.")
         return
-    await state.update_data(image_file_id=file_id, image_type=image_type)
+    data = await state.get_data()
+    images = list(data.get("images", []))
+    if len(images) >= 6:
+        await message.answer("Уже загружено максимум 6 фотографий. Нажмите «✅ Готово».", reply_markup=images_done_keyboard("admin:addimages", 6))
+        return
+    images.append(image)
+    await state.update_data(images=images)
+    await message.answer(
+        f"✅ Фотография добавлена: {len(images)}/6",
+        reply_markup=images_done_keyboard("admin:addimages", len(images)),
+    )
+
+
+@router.callback_query(AddProduct.image, F.data == "admin:addimages:done")
+async def add_images_done(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    images = data.get("images", [])
+    if not images:
+        await callback.answer("Добавьте хотя бы одну фотографию.", show_alert=True)
+        return
     await state.set_state(AddProduct.price)
-    await message.answer("Цена товара:")
+    await callback.answer()
+    await callback.message.answer("Цена товара:")
 
 
 @router.message(AddProduct.image)
 async def image_required(message: Message) -> None:
-    await message.answer("Отправьте картинку как фото или файл.")
+    await message.answer("Отправьте от 1 до 6 изображений, затем нажмите «✅ Готово».")
 
 
 @router.message(AddProduct.price)
 async def add_price(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     price = (message.text or "").strip()
+    images = data.get("images", [])
+    if not images:
+        await state.set_state(AddProduct.image)
+        await message.answer("Сначала добавьте хотя бы одну фотографию.")
+        return
     db = await connect()
     try:
-        await db.execute("""
+        cursor = await db.execute("""
             INSERT INTO products(category, title, description, image_file_id,
                                  image_type, price_text, price_num, active, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)
         """, (
             data["category"], data["title"], data["description"],
-            data["image_file_id"], data["image_type"],
+            images[0]["file_id"], images[0]["image_type"],
             price, parse_price(price), now_ts(),
         ))
+        product_id = cursor.lastrowid
         await db.commit()
     finally:
         await db.close()
+    await save_product_images(product_id, images, replace=True)
     await state.clear()
-    await message.answer("✅ Товар добавлен.", reply_markup=admin_menu())
+    await message.answer(
+        f"✅ Товар добавлен. Фотографий: {len(images)}.",
+        reply_markup=admin_menu(),
+    )
 
 
 @router.callback_query((F.data == "admin:products") | F.data.startswith("admin:products:"))
@@ -550,8 +597,6 @@ async def edit_product_start(callback: CallbackQuery, state: FSMContext) -> None
     await state.set_state(EditProduct.category)
     await state.update_data(
         product_id=product_id,
-        old_image_file_id=product["image_file_id"],
-        old_image_type=product["image_type"],
     )
     await callback.answer()
     await callback.message.answer(
@@ -596,38 +641,57 @@ async def edit_title(message: Message, state: FSMContext) -> None:
 @router.message(EditProduct.description)
 async def edit_description(message: Message, state: FSMContext) -> None:
     value = (message.text or "").strip()
-    await state.update_data(description=None if value == "-" else value)
+    await state.update_data(description=None if value == "-" else value, images=[])
     await state.set_state(EditProduct.image)
     await message.answer(
-        "Отправьте новую картинку.\n"
-        "Чтобы оставить старую, отправьте текст «-»."
+        "📸 Отправьте от 1 до 6 новых фотографий, чтобы полностью заменить старые.\n"
+        "Либо нажмите «➖ Оставить прежние фото». После загрузки нажмите «✅ Готово».",
+        reply_markup=images_done_keyboard("admin:editimages", 0, allow_keep=True),
     )
 
 
 @router.message(EditProduct.image, F.photo | F.document)
 async def edit_image(message: Message, state: FSMContext) -> None:
-    if message.photo:
-        file_id, image_type = message.photo[-1].file_id, "photo"
-    elif message.document and (message.document.mime_type or "").startswith("image/"):
-        file_id, image_type = message.document.file_id, "document"
-    else:
-        await message.answer("Нужно отправить изображение или «-».")
+    image = extract_image(message)
+    if not image:
+        await message.answer("Нужно отправить изображение.")
         return
-    await state.update_data(image_file_id=file_id, image_type=image_type)
-    await state.set_state(EditProduct.price)
-    await message.answer("Введите новую цену или «-», чтобы оставить прежнюю.")
+    data = await state.get_data()
+    images = list(data.get("images", []))
+    if len(images) >= 6:
+        await message.answer("Уже загружено максимум 6 фотографий.", reply_markup=images_done_keyboard("admin:editimages", 6, allow_keep=True))
+        return
+    images.append(image)
+    await state.update_data(images=images, replace_images=True)
+    await message.answer(
+        f"✅ Новая фотография добавлена: {len(images)}/6",
+        reply_markup=images_done_keyboard("admin:editimages", len(images), allow_keep=True),
+    )
 
 
-@router.message(EditProduct.image, F.text == "-")
-async def edit_keep_image(message: Message, state: FSMContext) -> None:
-    await state.update_data(image_file_id=None, image_type=None)
+@router.callback_query(EditProduct.image, F.data == "admin:editimages:done")
+async def edit_images_done(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    if not data.get("images"):
+        await callback.answer("Добавьте хотя бы одну новую фотографию или оставьте прежние.", show_alert=True)
+        return
+    await state.update_data(replace_images=True)
     await state.set_state(EditProduct.price)
-    await message.answer("Введите новую цену или «-», чтобы оставить прежнюю.")
+    await callback.answer()
+    await callback.message.answer("Введите новую цену или «-», чтобы оставить прежнюю.")
+
+
+@router.callback_query(EditProduct.image, F.data == "admin:editimages:keep")
+async def edit_keep_images(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.update_data(images=[], replace_images=False)
+    await state.set_state(EditProduct.price)
+    await callback.answer()
+    await callback.message.answer("Введите новую цену или «-», чтобы оставить прежнюю.")
 
 
 @router.message(EditProduct.image)
 async def edit_image_invalid(message: Message) -> None:
-    await message.answer("Отправьте новую картинку или текст «-».")
+    await message.answer("Отправьте фотографии или воспользуйтесь кнопкой «Оставить прежние фото».")
 
 
 @router.message(EditProduct.price)
@@ -645,25 +709,36 @@ async def edit_price(message: Message, state: FSMContext) -> None:
     category = data.get("category") or product["category"]
     title = data.get("title") or product["title"]
     description = data.get("description") or product["description"]
-    image_file_id = data.get("image_file_id") or data["old_image_file_id"]
-    image_type = data.get("image_type") or data["old_image_type"]
     price_text = product["price_text"] if value == "-" else value
     price_num = product["price_num"] if value == "-" else parse_price(value)
+    images = data.get("images", [])
+    replace_images = bool(data.get("replace_images"))
+    first_image = images[0] if replace_images and images else None
 
     db = await connect()
     try:
-        await db.execute("""
-            UPDATE products
-            SET category=?, title=?, description=?, image_file_id=?,
-                image_type=?, price_text=?, price_num=?
-            WHERE id=? AND deleted_at IS NULL
-        """, (
-            category, title, description, image_file_id,
-            image_type, price_text, price_num, product_id,
-        ))
+        if first_image:
+            await db.execute("""
+                UPDATE products
+                SET category=?, title=?, description=?, image_file_id=?,
+                    image_type=?, price_text=?, price_num=?
+                WHERE id=? AND deleted_at IS NULL
+            """, (
+                category, title, description, first_image["file_id"],
+                first_image["image_type"], price_text, price_num, product_id,
+            ))
+        else:
+            await db.execute("""
+                UPDATE products
+                SET category=?, title=?, description=?, price_text=?, price_num=?
+                WHERE id=? AND deleted_at IS NULL
+            """, (category, title, description, price_text, price_num, product_id))
         await db.commit()
     finally:
         await db.close()
+
+    if replace_images:
+        await save_product_images(product_id, images, replace=True)
 
     await state.clear()
     await message.answer(

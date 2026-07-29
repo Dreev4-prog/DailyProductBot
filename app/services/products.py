@@ -6,6 +6,7 @@ from app.core import bot
 from app.config import settings
 from app.database import connect, now_ts
 from app.keyboards import product_actions
+from app.services.media import send_product_gallery
 from app.utils import product_caption
 
 
@@ -57,16 +58,13 @@ async def select_product_by_category(user_id: int, category: str):
 
 async def send_product(user_id: int, product) -> bool:
     try:
-        kwargs = dict(
+        await send_product_gallery(bot, user_id, product["id"])
+        await bot.send_message(
             chat_id=user_id,
-            caption=product_caption(product),
+            text=product_caption(product),
             parse_mode="HTML",
             reply_markup=product_actions(product["id"]),
         )
-        if product["image_type"] == "document":
-            await bot.send_document(document=product["image_file_id"], **kwargs)
-        else:
-            await bot.send_photo(photo=product["image_file_id"], **kwargs)
 
         db = await connect()
         try:
