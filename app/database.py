@@ -112,6 +112,20 @@ async def init_db() -> None:
             used_at INTEGER NOT NULL,
             PRIMARY KEY(code, user_id)
         );
+
+        CREATE TABLE IF NOT EXISTS bot_admins (
+            user_id INTEGER PRIMARY KEY,
+            added_by INTEGER NOT NULL,
+            created_at INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS broadcasts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            admin_id INTEGER NOT NULL,
+            sent_count INTEGER NOT NULL DEFAULT 0,
+            failed_count INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL
+        );
         """)
 
         columns = await (await db.execute("PRAGMA table_info(products)")).fetchall()

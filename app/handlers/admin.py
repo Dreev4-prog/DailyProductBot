@@ -6,6 +6,7 @@ from aiogram.types import CallbackQuery, Message, InlineKeyboardButton, InlineKe
 
 from app.config import settings
 from app.database import connect, now_ts
+import sqlite3
 from app.keyboards import admin_menu, category_keyboard, PRODUCT_CATEGORIES
 from app.services.access import activate_access
 from app.utils import brand_header, parse_price
@@ -31,10 +32,49 @@ class EditProduct(StatesGroup):
 
 class Broadcast(StatesGroup):
     message = State()
+    confirm = State()
+
+
+class AddAdmin(StatesGroup):
+    user_id = State()
 
 
 def admin_only(user_id: int) -> bool:
-    return user_id in settings.admin_ids
+    if user_id in settings.admin_ids:
+        return True
+    try:
+        with sqlite3.connect(settings.database_path) as db:
+            row = db.execute(
+                "SELECT 1 FROM bot_admins WHERE user_id=?",
+                (user_id,),
+            ).fetchone()
+            return row is not None
+    except sqlite3.Error:
+        return False
+
+
+def admin_settings_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👤 Администраторы", callback_data="admin:admins")],
+        [InlineKeyboardButton(text="💳 Проверить платежи", callback_data="admin:payment_status")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin:panel")],
+    ])
+
+
+def admins_keyboard(rows) -> InlineKeyboardMarkup:
+    buttons = [
+        [InlineKeyboardButton(text="➕ Добавить администратора", callback_data="admin:add_admin")],
+    ]
+    for row in rows:
+        user_id = int(row["user_id"])
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"❌ Удалить {user_id}",
+                callback_data=f"admin:remove_admin_confirm:{user_id}",
+            )
+        ])
+    buttons.append([InlineKeyboardButton(text="⬅️ Настройки", callback_data="admin:settings")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 def products_list_keyboard(rows, page: int, trash: bool = False) -> InlineKeyboardMarkup:
@@ -121,6 +161,171 @@ async def admin(message: Message) -> None:
             parse_mode="HTML",
             reply_markup=admin_menu(),
         )
+
+
+@router.callback_query(F.data == "admin:panel")
+async def admin_panel_callback(callback: CallbackQuery) -> None:
+    if not admin_only(callback.from_user.id):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    await callback.answer()
+    await callback.message.answer(
+        brand_header("ПАНЕЛЬ АДМИНИСТРАТОРА"),
+        parse_mode="HTML",
+        reply_markup=admin_menu(),
+    )
+
+
+@router.callback_query(F.data == "admin:settings")
+async def admin_settings(callback: CallbackQuery) -> None:
+    if not admin_only(callback.from_user.id):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    await callback.answer()
+    await callback.message.answer(
+        "⚙️ <b>Настройки</b>\n\nВыберите раздел:",
+        parse_mode="HTML",
+        reply_markup=admin_settings_keyboard(),
+    )
+
+
+@router.callback_query(F.data == "admin:payment_status")
+async def payment_status_callback(callback: CallbackQuery) -> None:
+    if not admin_only(callback.from_user.id):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    crypto = "✅ включён" if settings.crypto_pay_enabled else "❌ выключен"
+    xrocket = "✅ включён" if settings.xrocket_enabled else "❌ выключен"
+    await callback.answer()
+    await callback.message.answer(
+        "💳 <b>Настройки оплаты</b>\n\n"
+        f"Crypto Bot: <b>{crypto}</b>\n"
+        f"xRocket: <b>{xrocket}</b>\n"
+        f"Цена: <b>{settings.price_usdt} USDT</b>\n"
+        f"Срок доступа: <b>{settings.access_days} дней</b>\n"
+        f"Товаров в день: <b>{settings.products_per_day}</b>\n\n"
+        "Цена и срок сейчас меняются в Railway Variables.",
+        parse_mode="HTML",
+        reply_markup=admin_settings_keyboard(),
+    )
+
+
+@router.callback_query(F.data == "admin:admins")
+async def admins_list(callback: CallbackQuery) -> None:
+    if not admin_only(callback.from_user.id):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    db = await connect()
+    try:
+        rows = await (await db.execute(
+            "SELECT user_id, added_by, created_at FROM bot_admins ORDER BY created_at DESC"
+        )).fetchall()
+    finally:
+        await db.close()
+
+    protected = sorted(settings.admin_ids)
+    protected_text = "\n".join(f"• <code>{uid}</code> — главный" for uid in protected) or "• не заданы"
+    added_text = "\n".join(f"• <code>{row['user_id']}</code>" for row in rows) or "• пока нет"
+    await callback.answer()
+    await callback.message.answer(
+        "👤 <b>Администраторы</b>\n\n"
+        "<b>Главные из Railway:</b>\n" + protected_text +
+        "\n\n<b>Добавленные через бота:</b>\n" + added_text +
+        "\n\nГлавных администраторов удалить через бота нельзя.",
+        parse_mode="HTML",
+        reply_markup=admins_keyboard(rows),
+    )
+
+
+@router.callback_query(F.data == "admin:add_admin")
+async def add_admin_start(callback: CallbackQuery, state: FSMContext) -> None:
+    if not admin_only(callback.from_user.id):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    await state.set_state(AddAdmin.user_id)
+    await callback.answer()
+    await callback.message.answer(
+        "Отправьте числовой Telegram ID нового администратора.\n\n"
+        "Для отмены: /cancel"
+    )
+
+
+@router.message(AddAdmin.user_id)
+async def add_admin_save(message: Message, state: FSMContext) -> None:
+    if not admin_only(message.from_user.id):
+        await state.clear()
+        return
+    value = (message.text or "").strip()
+    if not value.isdigit():
+        await message.answer("Нужен числовой Telegram ID, например: 123456789")
+        return
+    new_admin_id = int(value)
+    if new_admin_id in settings.admin_ids:
+        await state.clear()
+        await message.answer("Этот ID уже является главным администратором.", reply_markup=admin_menu())
+        return
+    db = await connect()
+    try:
+        await db.execute(
+            "INSERT OR IGNORE INTO bot_admins(user_id, added_by, created_at) VALUES (?, ?, ?)",
+            (new_admin_id, message.from_user.id, now_ts()),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+    await state.clear()
+    await message.answer(
+        f"✅ Администратор <code>{new_admin_id}</code> добавлен.\n"
+        "Он может открыть панель командой /admin.",
+        parse_mode="HTML",
+        reply_markup=admin_menu(),
+    )
+
+
+@router.callback_query(F.data.startswith("admin:remove_admin_confirm:"))
+async def remove_admin_confirm(callback: CallbackQuery) -> None:
+    if not admin_only(callback.from_user.id):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    user_id = int(callback.data.rsplit(":", 1)[1])
+    if user_id in settings.admin_ids:
+        await callback.answer("Главного администратора удалить нельзя.", show_alert=True)
+        return
+    await callback.answer()
+    await callback.message.answer(
+        f"Удалить администратора <code>{user_id}</code>?",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Да, удалить", callback_data=f"admin:remove_admin:{user_id}")],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="admin:admins")],
+        ]),
+    )
+
+
+@router.callback_query(F.data.startswith("admin:remove_admin:"))
+async def remove_admin(callback: CallbackQuery) -> None:
+    if not admin_only(callback.from_user.id):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    user_id = int(callback.data.rsplit(":", 1)[1])
+    if user_id in settings.admin_ids:
+        await callback.answer("Главного администратора удалить нельзя.", show_alert=True)
+        return
+    if user_id == callback.from_user.id:
+        await callback.answer("Нельзя удалить самого себя.", show_alert=True)
+        return
+    db = await connect()
+    try:
+        await db.execute("DELETE FROM bot_admins WHERE user_id=?", (user_id,))
+        await db.commit()
+    finally:
+        await db.close()
+    await callback.answer("Администратор удалён.", show_alert=True)
+    await callback.message.answer(
+        f"✅ Администратор <code>{user_id}</code> удалён.",
+        parse_mode="HTML",
+        reply_markup=admin_settings_keyboard(),
+    )
 
 
 @router.callback_query(F.data == "admin:add")
@@ -542,44 +747,84 @@ async def noop(callback: CallbackQuery) -> None:
 @router.callback_query(F.data == "admin:users")
 async def users(callback: CallbackQuery) -> None:
     if not admin_only(callback.from_user.id):
+        await callback.answer("Нет доступа.", show_alert=True)
         return
+    today_start = int(__import__("datetime").datetime.combine(
+        __import__("datetime").datetime.now(settings.timezone).date(),
+        __import__("datetime").time.min,
+        tzinfo=settings.timezone,
+    ).timestamp())
     db = await connect()
     try:
         total = await (await db.execute("SELECT COUNT(*) c FROM users")).fetchone()
         active = await (await db.execute(
             "SELECT COUNT(*) c FROM users WHERE access_until>?", (now_ts(),)
         )).fetchone()
+        new_today = await (await db.execute(
+            "SELECT COUNT(*) c FROM users WHERE created_at>=?", (today_start,)
+        )).fetchone()
+        seen_today = await (await db.execute(
+            "SELECT COUNT(*) c FROM users WHERE last_seen>=?", (today_start,)
+        )).fetchone()
+        blocked = await (await db.execute(
+            "SELECT COUNT(*) c FROM users WHERE blocked=1"
+        )).fetchone()
     finally:
         await db.close()
     await callback.answer()
-    await callback.message.answer(f"Пользователей: {total['c']}\nАктивных: {active['c']}")
+    await callback.message.answer(
+        brand_header("ПОЛЬЗОВАТЕЛИ") +
+        f"\n👥 Всего: <b>{total['c']}</b>\n"
+        f"💎 Активная подписка: <b>{active['c']}</b>\n"
+        f"🆕 Новых сегодня: <b>{new_today['c']}</b>\n"
+        f"🟢 Заходили сегодня: <b>{seen_today['c']}</b>\n"
+        f"🚫 Заблокировали бота: <b>{blocked['c']}</b>",
+        parse_mode="HTML",
+        reply_markup=admin_menu(),
+    )
 
 
 @router.callback_query(F.data == "admin:stats")
 async def stats(callback: CallbackQuery) -> None:
     if not admin_only(callback.from_user.id):
+        await callback.answer("Нет доступа.", show_alert=True)
         return
+    local_now = __import__("datetime").datetime.now(settings.timezone)
+    today = local_now.date().isoformat()
+    today_start = int(__import__("datetime").datetime.combine(
+        local_now.date(), __import__("datetime").time.min, tzinfo=settings.timezone
+    ).timestamp())
     db = await connect()
     try:
         users = await (await db.execute("SELECT COUNT(*) c FROM users")).fetchone()
-        products = await (await db.execute("SELECT COUNT(*) c FROM products WHERE active=1")).fetchone()
+        active_users = await (await db.execute("SELECT COUNT(*) c FROM users WHERE access_until>?", (now_ts(),))).fetchone()
+        products = await (await db.execute("SELECT COUNT(*) c FROM products WHERE active=1 AND deleted_at IS NULL")).fetchone()
         assignments = await (await db.execute("SELECT COUNT(*) c FROM assignments")).fetchone()
+        today_assignments = await (await db.execute("SELECT COUNT(*) c FROM assignments WHERE assignment_date=?", (today,))).fetchone()
         sold = await (await db.execute("SELECT COUNT(*) c FROM feedback WHERE status='sold'")).fetchone()
-        revenue = await (await db.execute("""
-            SELECT COALESCE(SUM(CAST(amount AS REAL)), 0) total
-            FROM invoices WHERE activated=1
-        """)).fetchone()
+        paid_today = await (await db.execute("SELECT COUNT(*) c FROM invoices WHERE activated=1 AND paid_at>=?", (today_start,))).fetchone()
+        revenue = await (await db.execute("SELECT COALESCE(SUM(CAST(amount AS REAL)), 0) total FROM invoices WHERE activated=1")).fetchone()
+        categories = await (await db.execute("SELECT p.category, COUNT(a.product_id) c FROM assignments a JOIN products p ON p.id=a.product_id GROUP BY p.category ORDER BY c DESC")).fetchall()
+        last_broadcast = await (await db.execute("SELECT * FROM broadcasts ORDER BY id DESC LIMIT 1")).fetchone()
     finally:
         await db.close()
+    category_text = "\n".join(f"• {row['category']}: <b>{row['c']}</b>" for row in categories) or "• Пока нет выдач"
+    broadcast_text = "Нет" if not last_broadcast else f"{last_broadcast['sent_count']} доставлено / {last_broadcast['failed_count']} ошибок"
     await callback.answer()
     await callback.message.answer(
-        brand_header("АНАЛИТИКА") +
-        f"\nПользователей: <b>{users['c']}</b>\n"
-        f"Товаров: <b>{products['c']}</b>\n"
-        f"Выдач: <b>{assignments['c']}</b>\n"
-        f"Продано: <b>{sold['c']}</b>\n"
-        f"Выручка: <b>{revenue['total']} USDT</b>",
+        brand_header("АНАЛИТИКА 3.0") +
+        f"\n👥 Пользователей: <b>{users['c']}</b>\n"
+        f"💎 Активных подписок: <b>{active_users['c']}</b>\n"
+        f"📦 Активных товаров: <b>{products['c']}</b>\n"
+        f"🎁 Всего выдач: <b>{assignments['c']}</b>\n"
+        f"☀️ Выдано сегодня: <b>{today_assignments['c']}</b>\n"
+        f"✅ Отмечено проданными: <b>{sold['c']}</b>\n"
+        f"💳 Оплат сегодня: <b>{paid_today['c']}</b>\n"
+        f"💰 Общая выручка: <b>{revenue['total']} USDT</b>\n\n"
+        f"<b>Популярность категорий:</b>\n{category_text}\n\n"
+        f"<b>Последняя рассылка:</b> {broadcast_text}",
         parse_mode="HTML",
+        reply_markup=admin_menu(),
     )
 
 
@@ -603,30 +848,100 @@ async def send_today(message: Message) -> None:
 
 @router.callback_query(F.data == "admin:broadcast")
 async def broadcast_start(callback: CallbackQuery, state: FSMContext) -> None:
-    if admin_only(callback.from_user.id):
-        await callback.answer()
-        await state.set_state(Broadcast.message)
-        await callback.message.answer("Отправьте сообщение для рассылки.")
+    if not admin_only(callback.from_user.id):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    await callback.answer()
+    await state.set_state(Broadcast.message)
+    await callback.message.answer(
+        "📣 <b>Новая рассылка</b>\n\n"
+        "Отправьте одно сообщение: текст, фото, видео, GIF или документ. "
+        "Бот сначала покажет предпросмотр и попросит подтверждение.\n\n"
+        "Для отмены: /cancel",
+        parse_mode="HTML",
+    )
 
 
 @router.message(Broadcast.message)
-async def broadcast_send(message: Message, state: FSMContext) -> None:
+async def broadcast_preview(message: Message, state: FSMContext) -> None:
     if not admin_only(message.from_user.id):
+        await state.clear()
         return
+    await state.update_data(source_chat_id=message.chat.id, source_message_id=message.message_id)
+    await state.set_state(Broadcast.confirm)
+    await message.answer(
+        "👁 <b>Предпросмотр рассылки</b>",
+        parse_mode="HTML",
+    )
+    await message.bot.copy_message(message.chat.id, message.chat.id, message.message_id)
+    await message.answer(
+        "Отправить это сообщение всем пользователям?",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Отправить всем", callback_data="admin:broadcast_confirm")],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="admin:broadcast_cancel")],
+        ]),
+    )
+
+
+@router.callback_query(Broadcast.confirm, F.data == "admin:broadcast_cancel")
+async def broadcast_cancel(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await callback.answer("Рассылка отменена.", show_alert=True)
+    await callback.message.answer("Рассылка отменена.", reply_markup=admin_menu())
+
+
+@router.callback_query(Broadcast.confirm, F.data == "admin:broadcast_confirm")
+async def broadcast_send(callback: CallbackQuery, state: FSMContext) -> None:
+    if not admin_only(callback.from_user.id):
+        await state.clear()
+        return
+    data = await state.get_data()
+    source_chat_id = data.get("source_chat_id")
+    source_message_id = data.get("source_message_id")
+    if not source_chat_id or not source_message_id:
+        await state.clear()
+        await callback.answer("Не найдено сообщение для рассылки.", show_alert=True)
+        return
+    await callback.answer()
+    progress = await callback.message.answer("⏳ Рассылка началась…")
     db = await connect()
     try:
         users = await (await db.execute("SELECT user_id FROM users WHERE blocked=0")).fetchall()
     finally:
         await db.close()
     sent = 0
-    for user in users:
+    failed = 0
+    for index, user in enumerate(users, start=1):
         try:
-            await message.bot.copy_message(user["user_id"], message.chat.id, message.message_id)
+            await callback.bot.copy_message(user["user_id"], source_chat_id, source_message_id)
             sent += 1
         except Exception:
+            failed += 1
+        if index % 50 == 0:
+            try:
+                await progress.edit_text(f"⏳ Обработано: {index}/{len(users)}\n✅ {sent}  ❌ {failed}")
+            except Exception:
+                pass
+    db = await connect()
+    try:
+        await db.execute(
+            "INSERT INTO broadcasts(admin_id, sent_count, failed_count, created_at) VALUES (?, ?, ?, ?)",
+            (callback.from_user.id, sent, failed, now_ts()),
+        )
+        if failed:
+            # Не считаем всех ошибочных навсегда заблокировавшими, но отмечаем тех, кому доставка не удалась.
             pass
+        await db.commit()
+    finally:
+        await db.close()
     await state.clear()
-    await message.answer(f"Доставлено: {sent}")
+    await progress.edit_text(
+        "✅ <b>Рассылка завершена</b>\n\n"
+        f"Доставлено: <b>{sent}</b>\n"
+        f"Не доставлено: <b>{failed}</b>",
+        parse_mode="HTML",
+        reply_markup=admin_menu(),
+    )
 
 
 @router.message(Command("grant"))

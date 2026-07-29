@@ -1,12 +1,4 @@
 {
-  "version": "2.2.0-category-choice",
-  "features": {
-    "admin_category_buttons": true,
-    "user_category_choice_each_product": true,
-    "products_per_day": 2,
-    "daily_reset_at_midnight": true,
-    "no_repeat_per_user": true,
-    "manual_user_delivery": true,
-    "xrocket_official_api": true
-  }
+  "version": "3.0",
+  "name": "Complete Admin Panel"
 }

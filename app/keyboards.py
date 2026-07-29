@@ -40,11 +40,17 @@ def payment_methods() -> InlineKeyboardMarkup:
 
 def admin_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Добавить товар", callback_data="admin:add")],
-        [InlineKeyboardButton(text="📦 База товаров", callback_data="admin:products")],
-        [InlineKeyboardButton(text="👥 Пользователи", callback_data="admin:users")],
-        [InlineKeyboardButton(text="📊 Аналитика", callback_data="admin:stats")],
-        [InlineKeyboardButton(text="📣 Рассылка", callback_data="admin:broadcast")],
+        [
+            InlineKeyboardButton(text="➕ Добавить товар", callback_data="admin:add"),
+            InlineKeyboardButton(text="📦 Товары", callback_data="admin:products:0"),
+        ],
+        [
+            InlineKeyboardButton(text="👥 Пользователи", callback_data="admin:users"),
+            InlineKeyboardButton(text="📊 Аналитика", callback_data="admin:stats"),
+        ],
+        [InlineKeyboardButton(text="📣 Создать рассылку", callback_data="admin:broadcast")],
+        [InlineKeyboardButton(text="⚙️ Настройки и администраторы", callback_data="admin:settings")],
+        [InlineKeyboardButton(text="🏠 Открыть меню пользователя", callback_data="menu:home")],
     ])
 
 
