@@ -153,7 +153,8 @@ CREATE TABLE IF NOT EXISTS products (
     price_num DOUBLE PRECISION,
     active INTEGER NOT NULL DEFAULT 1,
     created_at BIGINT NOT NULL,
-    deleted_at BIGINT
+    deleted_at BIGINT,
+    tags TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS product_images (
@@ -243,6 +244,8 @@ CREATE TABLE IF NOT EXISTS bot_settings (
 
 CREATE INDEX IF NOT EXISTS idx_assignments_user_date ON assignments(user_id, assignment_date);
 CREATE INDEX IF NOT EXISTS idx_products_category_active ON products(category, active);
+CREATE INDEX IF NOT EXISTS idx_products_title_lower ON products(LOWER(title));
+CREATE INDEX IF NOT EXISTS idx_products_deleted_at ON products(deleted_at);
 CREATE INDEX IF NOT EXISTS idx_invoices_pending ON invoices(provider, activated, created_at);
 """
 
@@ -323,6 +326,7 @@ async def init_db() -> None:
         await connection.execute(POSTGRES_SCHEMA)
         # Compatibility for databases created by an earlier 4.0 build.
         await connection.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS deleted_at BIGINT")
+        await connection.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS tags TEXT NOT NULL DEFAULT ''")
         await connection.execute(
             """
             INSERT INTO product_images(product_id, file_id, image_type, position, created_at)

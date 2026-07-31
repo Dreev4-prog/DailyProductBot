@@ -10,6 +10,7 @@ import sqlite3
 from app.keyboards import admin_menu, category_keyboard, PRODUCT_CATEGORIES
 from app.services.access import activate_access
 from app.services.media import get_product_images, save_product_images, send_product_gallery
+from app.services.search import find_similar_products, search_products
 from app.utils import brand_header, parse_price
 
 router = Router()
@@ -42,6 +43,14 @@ class AddAdmin(StatesGroup):
 
 class EditWelcome(StatesGroup):
     text = State()
+
+
+class ProductSearch(StatesGroup):
+    query = State()
+
+
+class DuplicateReview(StatesGroup):
+    decision = State()
 
 
 def admin_only(user_id: int) -> bool:
@@ -104,7 +113,37 @@ def products_list_keyboard(rows, page: int, trash: bool = False) -> InlineKeyboa
     if trash:
         buttons.append([InlineKeyboardButton(text="↩️ К товарам", callback_data="admin:products:0")])
     else:
+        buttons.append([InlineKeyboardButton(text="🔍 Поиск и фильтры", callback_data="admin:products_hub")])
         buttons.append([InlineKeyboardButton(text="🗑 Корзина", callback_data="admin:trash:0")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def products_hub_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔍 Поиск товара", callback_data="admin:product_search")],
+        [
+            InlineKeyboardButton(text="💰 50–100 €", callback_data="admin:product_filter:50_100:0"),
+            InlineKeyboardButton(text="💎 100–200 €", callback_data="admin:product_filter:100_200:0"),
+        ],
+        [InlineKeyboardButton(text="👑 200–500 €", callback_data="admin:product_filter:200_500:0")],
+        [
+            InlineKeyboardButton(text="🟢 Активные", callback_data="admin:product_filter:active:0"),
+            InlineKeyboardButton(text="⚫️ Скрытые", callback_data="admin:product_filter:hidden:0"),
+        ],
+        [InlineKeyboardButton(text="📈 Популярные", callback_data="admin:popular_products")],
+        [InlineKeyboardButton(text="🗑 Корзина", callback_data="admin:trash:0")],
+        [InlineKeyboardButton(text="⬅️ Админ-панель", callback_data="admin:panel")],
+    ])
+
+
+def duplicate_review_keyboard(rows) -> InlineKeyboardMarkup:
+    buttons = []
+    for row in rows[:5]:
+        buttons.append([InlineKeyboardButton(text=f"👁 #{row['id']} {row['title'][:28]}", callback_data=f"admin:duplicate_open:{row['id']}")])
+    buttons.extend([
+        [InlineKeyboardButton(text="➕ Всё равно добавить", callback_data="admin:duplicate_continue")],
+        [InlineKeyboardButton(text="❌ Отменить", callback_data="admin:duplicate_cancel")],
+    ])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
@@ -156,7 +195,14 @@ async def show_product_card(callback: CallbackQuery, product_id: int) -> None:
         return
 
     deleted = product["deleted_at"] is not None
+    db = await connect()
+    try:
+        issued = await (await db.execute("SELECT COUNT(*) c FROM assignments WHERE product_id=?", (product_id,))).fetchone()
+        favorites = await (await db.execute("SELECT COUNT(*) c FROM favorites WHERE product_id=?", (product_id,))).fetchone()
+    finally:
+        await db.close()
     image_count = await send_product_gallery(callback.bot, callback.from_user.id, product_id)
+    created_text = __import__("datetime").datetime.fromtimestamp(product["created_at"], settings.timezone).strftime("%d.%m.%Y")
     card_text = (
         f"📦 <b>Товар #{product['id']}</b>\n\n"
         f"Категория: <b>{product['category']}</b>\n"
@@ -164,6 +210,9 @@ async def show_product_card(callback: CallbackQuery, product_id: int) -> None:
         f"Описание: {product['description']}\n"
         f"Цена: <b>{product['price_text']}</b>\n"
         f"Фотографий: <b>{image_count}</b>\n"
+        f"📦 Выдан: <b>{issued['c']}</b> раз\n"
+        f"⭐ В избранном: <b>{favorites['c']}</b>\n"
+        f"📅 Добавлен: <b>{created_text}</b>\n"
         f"Статус: <b>{'В корзине' if deleted else ('Активен' if product['active'] else 'Скрыт')}</b>"
     )
 
@@ -419,9 +468,41 @@ async def add_category_text_disabled(message: Message) -> None:
 
 @router.message(AddProduct.title)
 async def add_title(message: Message, state: FSMContext) -> None:
-    await state.update_data(title=(message.text or "").strip())
+    title = (message.text or "").strip()
+    if len(title) < 2:
+        await message.answer("Название слишком короткое. Введите минимум 2 символа.")
+        return
+    await state.update_data(title=title)
+    similar = await find_similar_products(title)
+    if similar:
+        await state.set_state(DuplicateReview.decision)
+        text = "⚠️ <b>В базе найдены похожие товары:</b>\n\n" + "\n".join(
+            f"• #{row['id']} {row['title']} — {row['category']}" for row in similar
+        ) + "\n\nПродолжить добавление?"
+        await message.answer(text, parse_mode="HTML", reply_markup=duplicate_review_keyboard(similar))
+        return
     await state.set_state(AddProduct.description)
     await message.answer("Описание товара:")
+
+
+@router.callback_query(DuplicateReview.decision, F.data == "admin:duplicate_continue")
+async def duplicate_continue(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(AddProduct.description)
+    await callback.answer()
+    await callback.message.answer("Описание товара:")
+
+
+@router.callback_query(DuplicateReview.decision, F.data == "admin:duplicate_cancel")
+async def duplicate_cancel(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await callback.answer("Добавление отменено.")
+    await callback.message.answer("❌ Добавление товара отменено.", reply_markup=admin_menu())
+
+
+@router.callback_query(DuplicateReview.decision, F.data.startswith("admin:duplicate_open:"))
+async def duplicate_open(callback: CallbackQuery) -> None:
+    await callback.answer()
+    await show_product_card(callback, int(callback.data.rsplit(":", 1)[1]))
 
 
 @router.message(AddProduct.description)
@@ -501,6 +582,108 @@ async def add_price(message: Message, state: FSMContext) -> None:
         f"✅ Товар добавлен. Фотографий: {len(images)}.",
         reply_markup=admin_menu(),
     )
+
+
+@router.callback_query(F.data == "admin:products_hub")
+async def products_hub(callback: CallbackQuery) -> None:
+    if not admin_only(callback.from_user.id):
+        return
+    await callback.answer()
+    await callback.message.answer("📦 <b>Управление товарами</b>\n\nВыберите действие:", parse_mode="HTML", reply_markup=products_hub_keyboard())
+
+
+@router.callback_query(F.data == "admin:product_search")
+async def product_search_start(callback: CallbackQuery, state: FSMContext) -> None:
+    if not admin_only(callback.from_user.id):
+        return
+    await state.set_state(ProductSearch.query)
+    await callback.answer()
+    await callback.message.answer("🔍 Введите название товара или часть названия.\n\nНапример: <code>Apple TV</code>", parse_mode="HTML")
+
+
+@router.message(ProductSearch.query)
+async def product_search_result(message: Message, state: FSMContext) -> None:
+    query = (message.text or "").strip()
+    if len(query) < 2:
+        await message.answer("Введите минимум 2 символа.")
+        return
+    rows = await search_products(query, limit=20)
+    await state.clear()
+    if not rows:
+        await message.answer(f"🔍 По запросу <b>{query}</b> ничего не найдено.", parse_mode="HTML", reply_markup=products_hub_keyboard())
+        return
+    await message.answer(
+        f"🔍 <b>Результаты поиска</b>\nЗапрос: <b>{query}</b>\nНайдено: <b>{len(rows)}</b>",
+        parse_mode="HTML",
+        reply_markup=products_list_keyboard(rows, 0),
+    )
+
+
+@router.callback_query(F.data.startswith("admin:product_filter:"))
+async def product_filter(callback: CallbackQuery) -> None:
+    if not admin_only(callback.from_user.id):
+        return
+    parts = callback.data.split(":")
+    filter_key = parts[2]
+    page = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
+    where = "deleted_at IS NULL"
+    params = []
+    labels = {"active": "Активные", "hidden": "Скрытые"}
+    if filter_key in PRODUCT_CATEGORIES:
+        where += " AND category=?"
+        params.append(PRODUCT_CATEGORIES[filter_key])
+        label = PRODUCT_CATEGORIES[filter_key]
+    elif filter_key == "active":
+        where += " AND active=1"
+        label = labels[filter_key]
+    elif filter_key == "hidden":
+        where += " AND active=0"
+        label = labels[filter_key]
+    else:
+        await callback.answer("Неизвестный фильтр.", show_alert=True)
+        return
+    params.append(page * 10)
+    db = await connect()
+    try:
+        rows = await (await db.execute(f"SELECT * FROM products WHERE {where} ORDER BY id DESC LIMIT 10 OFFSET ?", tuple(params))).fetchall()
+    finally:
+        await db.close()
+    await callback.answer()
+    if not rows:
+        await callback.message.answer(f"📂 В фильтре <b>{label}</b> товаров нет.", parse_mode="HTML", reply_markup=products_hub_keyboard())
+        return
+    await callback.message.answer(f"📂 <b>{label}</b>", parse_mode="HTML", reply_markup=products_list_keyboard(rows, page))
+
+
+@router.callback_query(F.data == "admin:popular_products")
+async def popular_products(callback: CallbackQuery) -> None:
+    if not admin_only(callback.from_user.id):
+        return
+    db = await connect()
+    try:
+        rows = await (await db.execute("""
+            SELECT p.*, COUNT(DISTINCT a.user_id) issue_count, COUNT(DISTINCT f.user_id) favorite_count
+            FROM products p
+            LEFT JOIN assignments a ON a.product_id=p.id
+            LEFT JOIN favorites f ON f.product_id=p.id
+            WHERE p.deleted_at IS NULL
+            GROUP BY p.id
+            ORDER BY issue_count DESC, favorite_count DESC, p.id DESC
+            LIMIT 10
+        """)).fetchall()
+    finally:
+        await db.close()
+    await callback.answer()
+    if not rows:
+        await callback.message.answer("📈 Пока нет товаров для статистики.", reply_markup=products_hub_keyboard())
+        return
+    text = "📈 <b>Популярные товары</b>\n\n" + "\n".join(
+        f"{i}. #{row['id']} {row['title']} — 📦 {row['issue_count']} / ⭐ {row['favorite_count']}"
+        for i, row in enumerate(rows, 1)
+    )
+    buttons = [[InlineKeyboardButton(text=f"👁 #{row['id']} {row['title'][:28]}", callback_data=f"admin:product:{row['id']}")] for row in rows]
+    buttons.append([InlineKeyboardButton(text="⬅️ Управление товарами", callback_data="admin:products_hub")])
+    await callback.message.answer(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
 
 
 @router.callback_query((F.data == "admin:products") | F.data.startswith("admin:products:"))

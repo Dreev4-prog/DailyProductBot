@@ -1,5 +1,14 @@
 {
-  "version": "4.0.0",
+  "version": "5.0.0",
   "database": "PostgreSQL",
-  "features": ["multi-image-products", "editable-welcome", "postgresql", "sqlite-auto-migration"]
+  "features": [
+    "smart-product-search",
+    "duplicate-product-check",
+    "product-filters",
+    "product-statistics",
+    "popular-products",
+    "multi-image-products",
+    "editable-welcome",
+    "postgresql"
+  ]
 }
